@@ -404,6 +404,23 @@ else
   fail "drain_runner_vm: expected no 'sudo -u' when runner_user is unset"
   cat "${DRAIN_CAPTURE_FILE}" >&2
 fi
+
+# Without runner_user, the config edit runs via plain `sudo`, whose `sed -i`
+# rewrites config.toml through a new inode owned by root:root — clobbering
+# setup.sh's chown of /etc/gitlab-runner to RUNNER_USER. drain_runner_vm
+# must stat the pre-edit owner/mode and restore them via `sudo chown`/`sudo
+# chmod` after the sed calls. This regression check pins that restore so a
+# later removal of the chown/chmod lines fails a test instead of silently
+# reintroducing the root:root ownership bug.
+if grep -Fq "stat -c '%U:%G'" "${DRAIN_CAPTURE_FILE}" \
+  && grep -Fq "stat -c '%a'" "${DRAIN_CAPTURE_FILE}" \
+  && grep -Fq "sudo chown" "${DRAIN_CAPTURE_FILE}" \
+  && grep -Fq "sudo chmod" "${DRAIN_CAPTURE_FILE}"; then
+  pass "drain_runner_vm: without runner_user, config ownership/mode is stat'd and restored"
+else
+  fail "drain_runner_vm: expected stat+chown+chmod ownership restore when runner_user is unset"
+  cat "${DRAIN_CAPTURE_FILE}" >&2
+fi
 rm -f "${DRAIN_CAPTURE_FILE}"
 unset DRAIN_CAPTURE_FILE
 
@@ -456,6 +473,18 @@ if grep -Fq 'systemctl is-active gitlab-runner.service' "${SCRIPT_DIR}/lib.sh"; 
   pass "lib.sh: idle poll confirms gitlab-runner.service is no longer active"
 else
   fail "lib.sh: idle poll missing gitlab-runner.service is-active probe"
+fi
+
+# The no-runner_user config edit must restore config.toml's pre-edit
+# owner/mode after `sudo sed -i` (which rewrites through a new root:root
+# inode) — pin the stat+chown+chmod restore as a regression check so a
+# drive-by deletion is caught even if the capture-mock test above is
+# refactored.
+if grep -Fq 'sudo chown "\$cfg_owner"' "${SCRIPT_DIR}/lib.sh" \
+  && grep -Fq 'sudo chmod "\$cfg_mode"' "${SCRIPT_DIR}/lib.sh"; then
+  pass "lib.sh: no-runner_user config edit restores owner/mode after sed -i"
+else
+  fail "lib.sh: no-runner_user config edit missing owner/mode restore"
 fi
 
 # gcp_drain_ssh's non-IAP branch must use a per-run known-hosts file (like
