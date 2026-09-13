@@ -108,13 +108,21 @@ build_scope_args() {
 # different operator draining/deleting a VM than the one who created it can
 # connect as a different identity. Without runner_user, the config edit
 # still runs via plain sudo (root can always write the file regardless of
-# owner); the podman query falls back to running as the connecting identity
-# and can under-report (wrong rootless namespace) if that identity differs
-# from the one gitlab-runner actually runs as.
+# owner), restoring the file's pre-edit owner/mode afterward since `sed -i`
+# rewrites through a new inode owned by root:root otherwise; the podman
+# query falls back to running as the connecting identity and can
+# under-report (wrong rootless namespace) if that identity differs from the
+# one gitlab-runner actually runs as.
 #
-# Idle is detected by watching per-job runner-* containers (podman ps), not
-# process exit: gitlab-runner's shutdown_timeout=0 only waits ~30s, so the
-# process can exit while a job container is still running.
+# Idle is detected by watching per-job runner-* containers (podman ps) AND
+# confirming gitlab-runner.service is no longer active, not process exit or
+# an empty container list alone: gitlab-runner's shutdown_timeout=0 only
+# waits ~30s, so the process can exit while a job container is still
+# running, and a job still in `podman pull`/prepare_exec (before it has
+# created its runner-${JOB_ID} container) shows an empty `podman ps` while
+# the service is still very much active. Idle therefore requires both no
+# leftover runner-* containers AND gitlab-runner.service reporting anything
+# other than "active", bounded throughout by DRAIN_TIMEOUT_SEC.
 #
 # The remote side sends SIGQUIT (not systemctl stop, which trips Fedora's
 # 45s TimeoutStopUSec abort) and runtime-masks the unit so Restart=always
@@ -123,7 +131,11 @@ build_scope_args() {
 #
 # Every remote_exec call (the initial signal, and each poll) runs under a
 # command-level timeout bounded by the remaining drain budget, so a hung SSH
-# session after connect cannot block the drain past DRAIN_TIMEOUT_SEC.
+# session after connect cannot block the drain past DRAIN_TIMEOUT_SEC. A
+# failed poll (SSH/IAP transport blip, virtctl hiccup) warns and retries on
+# the next poll interval rather than proceeding immediately — only the
+# overall DRAIN_TIMEOUT_SEC cap gives up early, so a single transient error
+# does not delete a VM with a job still running.
 #
 # Env:
 #   DRAIN_TIMEOUT_SEC — cap in seconds (default 600). Non-numeric values
@@ -132,11 +144,16 @@ build_scope_args() {
 drain_runner_vm() {
   local remote_exec="$1"
   local runner_user="${2:-}"
-  local timeout_sec poll_sec cmd_timeout start now elapsed remaining rc containers
-  local remote_cmd sudo_prefix ps_cmd
+  local timeout_sec poll_sec cmd_timeout start now elapsed remaining rc
+  local remote_cmd sudo_prefix ps_cmd poll_output containers svc_status
 
   if [ -z "${remote_exec}" ]; then
     echo "ERROR: drain_runner_vm requires a remote exec function" >&2
+    return 1
+  fi
+
+  if [ -n "${runner_user}" ] && ! [[ "${runner_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo "ERROR: drain_runner_vm: runner_user must be a plain Unix user name (got: ${runner_user})" >&2
     return 1
   fi
 
@@ -162,7 +179,15 @@ drain_runner_vm() {
   # caught by the same rc check below as a transport failure — this used to
   # end with an unconditional "true", so a fully-failed drain could still
   # report success.
-  remote_cmd=$(cat <<EOF
+  #
+  # Without runner_user, the config edit runs via plain `sudo`, whose
+  # `sed -i` rewrites the file through a new inode owned by root:root —
+  # clobbering setup.sh's chown of /etc/gitlab-runner to RUNNER_USER, which
+  # the gitlab-runner service (User=${RUNNER_USER}) needs to keep reading
+  # its own config. Stat the pre-edit owner/mode and restore them after the
+  # sed calls so a plain-sudo edit does not change who owns the file.
+  if [ -n "${runner_user}" ]; then
+    remote_cmd=$(cat <<EOF
 status=0
 cfg=/etc/gitlab-runner/config.toml
 if ${sudo_prefix} test -f "\$cfg"; then
@@ -175,11 +200,40 @@ sudo systemctl kill --kill-whom=main -s QUIT gitlab-runner.service >/dev/null 2>
 exit "\$status"
 EOF
 )
-
-  if [ -n "${runner_user}" ]; then
-    ps_cmd="sudo -u ${runner_user} podman ps --format '{{.Names}}'"
   else
-    ps_cmd="podman ps --format '{{.Names}}'"
+    remote_cmd=$(cat <<EOF
+status=0
+cfg=/etc/gitlab-runner/config.toml
+if sudo test -f "\$cfg"; then
+  cfg_owner=\$(sudo stat -c '%U:%G' "\$cfg" 2>/dev/null) || cfg_owner=""
+  cfg_mode=\$(sudo stat -c '%a' "\$cfg" 2>/dev/null) || cfg_mode=""
+  sudo sed -i '/^shutdown_timeout/d' "\$cfg" || status=1
+  sudo sed -i '1i shutdown_timeout = ${timeout_sec}' "\$cfg" || status=1
+  if [ -n "\$cfg_owner" ]; then
+    sudo chown "\$cfg_owner" "\$cfg" || status=1
+  fi
+  if [ -n "\$cfg_mode" ]; then
+    sudo chmod "\$cfg_mode" "\$cfg" || status=1
+  fi
+fi
+sudo systemctl kill --kill-whom=main -s HUP gitlab-runner.service >/dev/null 2>&1 || status=1
+sudo systemctl mask --runtime gitlab-runner.service >/dev/null 2>&1 || status=1
+sudo systemctl kill --kill-whom=main -s QUIT gitlab-runner.service >/dev/null 2>&1 || status=1
+exit "\$status"
+EOF
+)
+  fi
+
+  # The poll command reports both leftover runner-* containers and whether
+  # gitlab-runner.service is still active, so idle detection (below) can
+  # require both signals instead of trusting an empty container list alone.
+  # `podman ps` failures propagate through $status (a real transport/podman
+  # problem); `systemctl is-active`'s own non-zero exit for inactive/failed
+  # units is deliberately swallowed so it never masks a podman failure.
+  if [ -n "${runner_user}" ]; then
+    ps_cmd="status=0; containers=\$(sudo -u ${runner_user} podman ps --format '{{.Names}}') || status=1; svc=\$(systemctl is-active gitlab-runner.service 2>/dev/null || true); printf '%s\n' \"\${containers}\"; printf '__SVC__%s\n' \"\${svc}\"; exit \"\${status}\""
+  else
+    ps_cmd="status=0; containers=\$(podman ps --format '{{.Names}}') || status=1; svc=\$(systemctl is-active gitlab-runner.service 2>/dev/null || true); printf '%s\n' \"\${containers}\"; printf '__SVC__%s\n' \"\${svc}\"; exit \"\${status}\""
   fi
 
   # A DURATION of 0 disables GNU timeout's cap entirely, so floor the
@@ -221,15 +275,25 @@ EOF
     fi
 
     rc=0
-    containers=$(timeout "${cmd_timeout}" bash -c '"$0" "$1"' "${remote_exec}" "${ps_cmd}" 2>/dev/null) || rc=$?
+    poll_output=$(timeout "${cmd_timeout}" bash -c '"$0" "$1"' "${remote_exec}" "${ps_cmd}" 2>/dev/null) || rc=$?
     if [ "${rc}" -ne 0 ]; then
-      echo "  WARN: drain poll failed (exit ${rc}) — proceeding" >&2
-      return 0
-    fi
-    containers=$(printf '%s\n' "${containers}" | grep '^runner-' || true)
-    if [ -z "${containers}" ]; then
-      echo "  OK: runner idle"
-      return 0
+      # A transport blip (SSH/IAP reconnect, virtctl hiccup) does not mean
+      # the job is done — retry on the next poll interval instead of
+      # proceeding immediately, so a single failure cannot short-circuit
+      # the drain. The cap check above still bounds total retry time.
+      echo "  WARN: drain poll failed (exit ${rc}) — retrying" >&2
+    else
+      svc_status=$(printf '%s\n' "${poll_output}" | grep '^__SVC__' | sed 's/^__SVC__//' || true)
+      containers=$(printf '%s\n' "${poll_output}" | grep '^runner-' || true)
+      # Idle requires both no leftover runner-* containers AND the service
+      # reporting anything other than "active" — an empty container list
+      # alone (e.g. a job still in podman pull/prepare_exec, before its
+      # runner-${JOB_ID} container exists) must not be treated as idle
+      # while gitlab-runner.service is still running.
+      if [ -z "${containers}" ] && [ "${svc_status}" != "active" ]; then
+        echo "  OK: runner idle"
+        return 0
+      fi
     fi
 
     now=$(date +%s)

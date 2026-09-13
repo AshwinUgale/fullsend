@@ -205,6 +205,16 @@ assert_fails_with \
   "requires a remote exec function" \
   drain_runner_vm ""
 
+# drain_runner_vm interpolates runner_user unquoted into remote shell
+# command strings, so it must validate the value itself (the same Unix
+# username regex both callers already enforce before calling it) rather
+# than trusting every future caller to have validated first.
+drain_noop_mock() { return 0; }
+assert_fails_with \
+  "drain_runner_vm: rejects invalid runner_user" \
+  "runner_user must be a plain Unix user name" \
+  drain_runner_vm drain_noop_mock "fedora; rm -rf /"
+
 # drain_idle_mock: succeeds every call and never reports a runner-*
 # container, so drain_runner_vm should detect idle on the first poll.
 drain_idle_mock() { return 0; }
@@ -219,20 +229,25 @@ DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 assert_succeeds_with \
 # systemctl/config-edit failures via its own exit status, a fully-failed
 # in-guest drain). drain_runner_vm warns, then falls through to the poll
 # loop (in case the runner is already draining despite the signal error).
-# The mock fails both the signal and the first poll, so drain-then-proceed
-# policy kicks in on the poll failure. Assert on both WARN messages.
+# The mock fails every call, so every poll fails too and drain-then-proceed
+# policy kicks in once the (short, for test speed) cap is reached. Assert
+# on both WARN messages.
 drain_signal_fail_mock() { return 1; }
 
-DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 assert_succeeds_with \
+DRAIN_TIMEOUT_SEC=2 DRAIN_POLL_SEC=1 assert_succeeds_with \
   "drain_runner_vm: signal failure warns and still polls" \
   "polling for idle anyway" \
   drain_runner_vm drain_signal_fail_mock
 
-# drain_poll_fail_mock: signal succeeds, the podman-ps poll transport fails.
-# Counter lives in a file (DRAIN_POLL_FAIL_COUNTER) since drain_runner_vm
-# runs every remote_exec call (including this mock) via `export -f` +
-# `bash -c` under `timeout`, so each call is a separate subprocess and an
-# in-memory counter would not persist across calls.
+# drain_poll_fail_mock: signal succeeds, but every poll after that fails
+# (a persistent transport failure, not a transient blip). drain_runner_vm
+# must retry within the drain budget rather than proceeding on the very
+# first failed poll (a single SSH/IAP blip must not delete a VM with a job
+# still running) — it should only give up once DRAIN_TIMEOUT_SEC is
+# reached. Counter lives in a file (DRAIN_POLL_FAIL_COUNTER) since
+# drain_runner_vm runs every remote_exec call (including this mock) via
+# `export -f` + `bash -c` under `timeout`, so each call is a separate
+# subprocess and an in-memory counter would not persist across calls.
 DRAIN_POLL_FAIL_COUNTER=$(mktemp)
 echo 0 > "${DRAIN_POLL_FAIL_COUNTER}"
 drain_poll_fail_mock() {
@@ -245,12 +260,88 @@ drain_poll_fail_mock() {
   return 1
 }
 export DRAIN_POLL_FAIL_COUNTER
-DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 assert_succeeds_with \
-  "drain_runner_vm: poll failure warns and proceeds" \
-  "WARN: drain poll failed" \
-  drain_runner_vm drain_poll_fail_mock
+DRAIN_TIMEOUT_SEC=2 DRAIN_POLL_SEC=1 \
+  output=$(drain_runner_vm drain_poll_fail_mock 2>&1) && rc=0 || rc=$?
+if [ "${rc}" -eq 0 ] \
+  && printf '%s' "${output}" | grep -Fq "WARN: drain poll failed" \
+  && printf '%s' "${output}" | grep -Fq "WARN: drain cap 2s reached"; then
+  pass "drain_runner_vm: persistent poll failure retries then gives up at cap"
+else
+  fail "drain_runner_vm: persistent poll failure did not retry to the cap"
+  printf '%s\n' "${output}" | tail -5 >&2
+fi
 rm -f "${DRAIN_POLL_FAIL_COUNTER}"
 unset DRAIN_POLL_FAIL_COUNTER
+
+# drain_transient_poll_fail_mock: the first poll fails (a transient blip),
+# but the second succeeds and reports idle. A retry-then-proceed-on-cap
+# implementation that instead proceeds immediately on the first failure
+# would never see the recovered idle state — assert both that the WARN
+# fires and that "OK: runner idle" is reached without hitting the cap.
+DRAIN_TRANSIENT_COUNTER=$(mktemp)
+echo 0 > "${DRAIN_TRANSIENT_COUNTER}"
+drain_transient_poll_fail_mock() {
+  local n
+  n=$(( $(cat "${DRAIN_TRANSIENT_COUNTER}") + 1 ))
+  echo "${n}" > "${DRAIN_TRANSIENT_COUNTER}"
+  if [ "${n}" -eq 2 ]; then
+    return 1
+  fi
+  return 0
+}
+export DRAIN_TRANSIENT_COUNTER
+DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 \
+  output=$(drain_runner_vm drain_transient_poll_fail_mock 2>&1) && rc=0 || rc=$?
+if [ "${rc}" -eq 0 ] \
+  && printf '%s' "${output}" | grep -Fq "WARN: drain poll failed" \
+  && printf '%s' "${output}" | grep -Fq "OK: runner idle" \
+  && ! printf '%s' "${output}" | grep -Fq "drain cap"; then
+  pass "drain_runner_vm: transient poll failure retries instead of proceeding immediately"
+else
+  fail "drain_runner_vm: transient poll failure did not retry within the drain budget"
+  printf '%s\n' "${output}" | tail -5 >&2
+fi
+rm -f "${DRAIN_TRANSIENT_COUNTER}"
+unset DRAIN_TRANSIENT_COUNTER
+
+# drain_service_active_mock: podman ps is empty on the very first poll (a
+# job still in `podman pull`/prepare_exec, before it has created its
+# runner-${JOB_ID} container) but gitlab-runner.service is still reported
+# active — a genuine "still shutting down" case, not idle. Idle-detection
+# that short-circuits on an empty container list alone would report idle
+# on the first poll (n=2); this mock only reports the service inactive
+# starting on the second poll (n=3), so the counter must reach 3 before
+# "OK: runner idle" appears.
+DRAIN_SVC_ACTIVE_COUNTER=$(mktemp)
+echo 0 > "${DRAIN_SVC_ACTIVE_COUNTER}"
+drain_service_active_mock() {
+  local n
+  n=$(( $(cat "${DRAIN_SVC_ACTIVE_COUNTER}") + 1 ))
+  echo "${n}" > "${DRAIN_SVC_ACTIVE_COUNTER}"
+  if [ "${n}" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${n}" -eq 2 ]; then
+    printf '__SVC__active\n'
+    return 0
+  fi
+  printf '__SVC__inactive\n'
+  return 0
+}
+export DRAIN_SVC_ACTIVE_COUNTER
+DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 \
+  output=$(drain_runner_vm drain_service_active_mock 2>&1) && rc=0 || rc=$?
+polls=$(cat "${DRAIN_SVC_ACTIVE_COUNTER}")
+if [ "${rc}" -eq 0 ] \
+  && printf '%s' "${output}" | grep -Fq "OK: runner idle" \
+  && [ "${polls}" -ge 3 ]; then
+  pass "drain_runner_vm: empty podman ps while service active is not idle on first poll"
+else
+  fail "drain_runner_vm: idle-detection short-circuited on empty podman ps without confirming the service stopped"
+  printf '%s\n' "${output}" | tail -5 >&2
+fi
+rm -f "${DRAIN_SVC_ACTIVE_COUNTER}"
+unset DRAIN_SVC_ACTIVE_COUNTER
 
 # drain_cap_overrun_mock: signal succeeds, podman always reports a
 # runner-* container still running — the cap must still be honored.
@@ -357,6 +448,22 @@ if grep -Fq 'export vm_name NAMESPACE VM_USER' "${DELETE_OCP}"; then
   pass "delete-openshift-vm.sh: exports closure variables before drain_runner_vm"
 else
   fail "delete-openshift-vm.sh: missing 'export vm_name NAMESPACE VM_USER' before drain_runner_vm"
+fi
+
+# Idle detection must confirm gitlab-runner.service is no longer active, not
+# just an empty podman ps — pin the is-active probe as a regression check.
+if grep -Fq 'systemctl is-active gitlab-runner.service' "${SCRIPT_DIR}/lib.sh"; then
+  pass "lib.sh: idle poll confirms gitlab-runner.service is no longer active"
+else
+  fail "lib.sh: idle poll missing gitlab-runner.service is-active probe"
+fi
+
+# gcp_drain_ssh's non-IAP branch must use a per-run known-hosts file (like
+# create-gcp-vm.sh's direct-IP path), not gcloud's default known-hosts file.
+if grep -Fq 'UserKnownHostsFile=${GCP_KNOWN_HOSTS}' "${DELETE_GCP}"; then
+  pass "delete-gcp-vm.sh: non-IAP drain SSH uses a per-run known-hosts file"
+else
+  fail "delete-gcp-vm.sh: non-IAP drain SSH missing per-run UserKnownHostsFile"
 fi
 
 # shutdown_timeout must be written to the global TOML table (line 1),

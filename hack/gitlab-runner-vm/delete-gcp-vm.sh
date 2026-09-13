@@ -165,8 +165,19 @@ else
   exit 1
 fi
 
+# Non-IAP (direct public-IP) drain connections trust-on-first-use and reject
+# key changes for the rest of this invocation, mirroring create-gcp-vm.sh's
+# direct-IP path — one known-hosts tempfile per delete invocation (not per
+# VM, not per drain poll), cleaned up on exit.
+GCP_KNOWN_HOSTS=""
+if [ "${GCP_USE_IAP}" = "false" ]; then
+  GCP_KNOWN_HOSTS=$(mktemp)
+  trap 'rm -f "${GCP_KNOWN_HOSTS}"' EXIT
+fi
+
 # SSH helper for drain_runner_vm. Reads vm_name, GCP_PROJECT, GCP_ZONE,
-# and GCP_USE_IAP from the environment (exported before drain_runner_vm).
+# GCP_USE_IAP, and GCP_KNOWN_HOSTS from the environment (exported before
+# drain_runner_vm).
 gcp_drain_ssh() {
   local ssh_flags=()
   if [ "${GCP_USE_IAP}" = "true" ]; then
@@ -178,6 +189,7 @@ gcp_drain_ssh() {
   else
     ssh_flags=(
       --ssh-flag="-o StrictHostKeyChecking=accept-new"
+      --ssh-flag="-o UserKnownHostsFile=${GCP_KNOWN_HOSTS}"
     )
   fi
   gcloud compute ssh "${vm_name}" \
@@ -204,7 +216,7 @@ for vm_name in "${vm_names[@]}"; do
   if [ "${no_drain}" = "true" ]; then
     echo "  skipping drain (--no-drain)"
   else
-    export vm_name GCP_PROJECT GCP_ZONE GCP_USE_IAP
+    export vm_name GCP_PROJECT GCP_ZONE GCP_USE_IAP GCP_KNOWN_HOSTS
     drain_runner_vm gcp_drain_ssh "${RUNNER_USER}"
   fi
 
