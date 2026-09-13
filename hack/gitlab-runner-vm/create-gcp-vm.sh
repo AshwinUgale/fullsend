@@ -5,6 +5,8 @@
 # This script:
 #   1. Auto-numbers the VM (fullsend-gitlab-runner-01, -02, ...)
 #   2. Creates a GCE VM via gcloud compute instances create
+#      with --no-service-account --no-scopes (the VM needs no Compute
+#      SA; the default editor SA would expose a stealable metadata token)
 #   3. Waits for SSH readiness, then installs packages via dnf
 #   4. Registers a new runner via the GitLab API, or joins an existing
 #      runner pool when RUNNER_TOKEN is set (runner-hub)
@@ -12,6 +14,10 @@
 #      executor, OpenShell gateway, and pre-pull images
 #
 # When done, the runner is online and accepting jobs tagged with RUNNER_TAG.
+#
+# setup.sh (step 5) is idempotent — safe to re-run in place as a
+# developer/debug convenience. Recreation (drain → delete → create) is
+# the compliance path; see issue #7257.
 #
 # Two modes:
 #   RUNNER_TOKEN — join an existing runner pool. Multiple VMs share one
@@ -284,7 +290,7 @@ for tool in gcloud python3 curl timeout sha256sum; do
   fi
 done
 for _f in setup.sh create-gcp-vm.sh gitlab-runner-version.sh \
-  executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh; do
+  executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh executor/gateway.sh; do
   if [ ! -f "${SCRIPT_DIR}/${_f}" ]; then
     echo "ERROR: required file not found: ${SCRIPT_DIR}/${_f}" >&2
     _missing=1
@@ -353,6 +359,11 @@ if [ "${GCP_USE_IAP}" = "true" ]; then
   address_flag=(--no-address)
 fi
 
+# No Compute SA / no OAuth scopes. The VM does not need a service
+# account (operator gcloud is workstation-side; inference uses GitLab
+# OIDC → WIF). The default Compute SA is roles/editor, and anything in
+# the orchestration container can steal its token from the metadata
+# server — #7254.
 gcloud compute instances create "${vm_name}" \
   --project="${GCP_PROJECT}" \
   --zone="${GCP_ZONE}" \
@@ -361,6 +372,8 @@ gcloud compute instances create "${vm_name}" \
   "${subnet_flag[@]+"${subnet_flag[@]}"}" \
   --tags="gitlab-runner" \
   "${address_flag[@]+"${address_flag[@]}"}" \
+  --no-service-account \
+  --no-scopes \
   --image-family="${GCP_IMAGE_FAMILY}" \
   --image-project="${GCP_IMAGE_PROJECT}" \
   --boot-disk-size="20GB" \
@@ -503,7 +516,7 @@ cp "${SCRIPT_DIR}/setup.sh" "${_stage_dir}/"
 cp "${SCRIPT_DIR}/create-gcp-vm.sh" "${_stage_dir}/"
 cp "${SCRIPT_DIR}/gitlab-runner-version.sh" "${_stage_dir}/"
 mkdir -p "${_stage_dir}/executor"
-for file in job_id.sh prepare.sh run.sh cleanup.sh; do
+for file in job_id.sh prepare.sh run.sh cleanup.sh gateway.sh; do
   cp "${SCRIPT_DIR}/executor/${file}" "${_stage_dir}/executor/"
 done
 mkdir -p "${_stage_dir}/.github/scripts"
@@ -538,7 +551,7 @@ echo "==> Verifying copied files"
 verify_copied_files() {
   {
     (cd "${SCRIPT_DIR}" && sha256sum setup.sh create-gcp-vm.sh gitlab-runner-version.sh \
-      executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh)
+      executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh executor/gateway.sh)
     (cd "${REPO_ROOT}/.github/scripts" \
       && sha256sum install-openshell.sh openshell-version.sh \
       | sed 's|  |  .github/scripts/|')
