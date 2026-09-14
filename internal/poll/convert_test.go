@@ -234,6 +234,91 @@ func TestToNormalizedEvent_MREventMerge(t *testing.T) {
 	}
 }
 
+func TestToNormalizedEvent_MREventOpened(t *testing.T) {
+	mc := newMockClient()
+	mc.memberLevel[42] = 30 // Developer -> "write"
+	mc.projectPaths[1] = "group/project"
+	p := newEventsPoller(mc)
+
+	event := RoutableEvent{
+		Type:            "mr_event",
+		Action:          "opened",
+		IID:             7,
+		NoteAuthorID:    42,
+		NoteAuthorLogin: "dev-user",
+		IsBot:           false,
+		MRSource:        1,
+		MRTarget:        1,
+		MRAuthorID:      42,
+		MRAuthorLogin:   "dev-user",
+		SourceBranch:    "feature",
+		TargetBranch:    "main",
+	}
+
+	ne, authorID, err := p.toNormalizedEvent(context.Background(), event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if authorID != 42 {
+		t.Errorf("authorID = %d, want 42", authorID)
+	}
+	if ne.Transition.Kind != "opened" {
+		t.Errorf("Transition.Kind = %q, want %q", ne.Transition.Kind, "opened")
+	}
+	if ne.Source.RawAction != "opened" {
+		t.Errorf("Source.RawAction = %q, want %q", ne.Source.RawAction, "opened")
+	}
+	if ne.Actor.ID != "dev-user" {
+		t.Errorf("Actor.ID = %q, want %q", ne.Actor.ID, "dev-user")
+	}
+	if ne.Actor.Role != "write" {
+		t.Errorf("Actor.Role = %q, want %q", ne.Actor.Role, "write")
+	}
+	if !ne.Actor.IsEntityAuthor {
+		t.Error("expected Actor.IsEntityAuthor to be true for MR author")
+	}
+	if ne.State.ChangeProposal == nil {
+		t.Fatal("expected State.ChangeProposal to be set for opened mr_event")
+	}
+	if ne.State.ChangeProposal.IsFork {
+		t.Error("expected ChangeProposal.IsFork to be false for same project")
+	}
+}
+
+func TestToNormalizedEvent_MREventOpenedActorFallback(t *testing.T) {
+	mc := newMockClient()
+	mc.memberLevel[42] = 40 // Maintainer -> "maintain"
+	mc.projectPaths[1] = "group/project"
+	p := newEventsPoller(mc)
+
+	// NoteAuthor* empty — fall back to MR author fields.
+	event := RoutableEvent{
+		Type:          "mr_event",
+		Action:        "opened",
+		IID:           7,
+		MRSource:      1,
+		MRTarget:      1,
+		MRAuthorID:    42,
+		MRAuthorLogin: "dev-user",
+		SourceBranch:  "feature",
+		TargetBranch:  "main",
+	}
+
+	ne, authorID, err := p.toNormalizedEvent(context.Background(), event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if authorID != 42 {
+		t.Errorf("authorID = %d, want 42", authorID)
+	}
+	if ne.Actor.ID != "dev-user" {
+		t.Errorf("Actor.ID = %q, want %q", ne.Actor.ID, "dev-user")
+	}
+	if ne.Transition.Kind != "opened" {
+		t.Errorf("Transition.Kind = %q, want %q", ne.Transition.Kind, "opened")
+	}
+}
+
 func TestToNormalizedEvent_UnresolvableActorError(t *testing.T) {
 	mc := newMockClient()
 	p := newEventsPoller(mc)
@@ -257,20 +342,22 @@ func TestToNormalizedEvent_UnresolvableActorError(t *testing.T) {
 
 func TestTranslateEventType(t *testing.T) {
 	tests := []struct {
-		input string
+		name  string
+		event RoutableEvent
 		want  string
 	}{
-		{"issue_label", "label_changed"},
-		{"issue_note", "comment_added"},
-		{"mr_note", "comment_added"},
-		{"mr_event", "merged"},
-		{"unknown", "unknown"},
+		{name: "issue_label", event: RoutableEvent{Type: "issue_label"}, want: "label_changed"},
+		{name: "issue_note", event: RoutableEvent{Type: "issue_note"}, want: "comment_added"},
+		{name: "mr_note", event: RoutableEvent{Type: "mr_note"}, want: "comment_added"},
+		{name: "mr_event merged", event: RoutableEvent{Type: "mr_event"}, want: "merged"},
+		{name: "mr_event opened", event: RoutableEvent{Type: "mr_event", Action: "opened"}, want: "opened"},
+		{name: "unknown", event: RoutableEvent{Type: "unknown"}, want: "unknown"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := translateEventType(tt.input)
+		t.Run(tt.name, func(t *testing.T) {
+			got := translateEventType(tt.event)
 			if got != tt.want {
-				t.Errorf("translateEventType(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("translateEventType(%+v) = %q, want %q", tt.event, got, tt.want)
 			}
 		})
 	}
@@ -517,20 +604,22 @@ func TestMapRawType(t *testing.T) {
 
 func TestMapRawAction(t *testing.T) {
 	tests := []struct {
-		input string
+		name  string
+		event RoutableEvent
 		want  string
 	}{
-		{"issue_label", "labeled"},
-		{"issue_note", "commented"},
-		{"mr_note", "commented"},
-		{"mr_event", "merged"},
-		{"unknown", ""},
+		{name: "issue_label", event: RoutableEvent{Type: "issue_label"}, want: "labeled"},
+		{name: "issue_note", event: RoutableEvent{Type: "issue_note"}, want: "commented"},
+		{name: "mr_note", event: RoutableEvent{Type: "mr_note"}, want: "commented"},
+		{name: "mr_event merged", event: RoutableEvent{Type: "mr_event"}, want: "merged"},
+		{name: "mr_event opened", event: RoutableEvent{Type: "mr_event", Action: "opened"}, want: "opened"},
+		{name: "unknown", event: RoutableEvent{Type: "unknown"}, want: ""},
 	}
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := mapRawAction(tt.input)
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapRawAction(tt.event)
 			if got != tt.want {
-				t.Errorf("mapRawAction(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("mapRawAction(%+v) = %q, want %q", tt.event, got, tt.want)
 			}
 		})
 	}
