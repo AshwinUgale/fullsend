@@ -82,10 +82,11 @@ func (p *Poller) toNormalizedEvent(ctx context.Context, event RoutableEvent) (di
 		return dispatch.NormalizedEvent{}, 0, fmt.Errorf("unresolvable actor")
 	}
 
-	if isBot && event.Type == "issue_label" {
-		return dispatch.NormalizedEvent{}, 0, fmt.Errorf("bot-applied label event filtered")
-	}
-
+	// Bot-applied labels are the designed stage-handoff mechanism
+	// (triage → code, review → fix). ADR 0067 filters bot-authored
+	// comments to prevent re-trigger loops; it does not apply to
+	// labels. Loop prevention for labels is handled by persisted
+	// label-state diffing and dispatch-key dedup in poll.go.
 	actorKind := "human"
 	if isBot {
 		actorKind = "bot"

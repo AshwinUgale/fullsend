@@ -127,6 +127,100 @@ func TestToNormalizedEvent_IssueLabel(t *testing.T) {
 	}
 }
 
+func TestToNormalizedEvent_IssueLabel_BotApplied(t *testing.T) {
+	mc := newMockClient()
+	mc.labelEvents[1] = []ResourceLabelEvent{
+		{
+			ID:     100,
+			Action: "add",
+			Label: struct {
+				Name string `json:"name"`
+			}{Name: "ready-to-code"},
+			User: UserRef{ID: 200, Username: "project_1_bot_abc", Bot: true},
+		},
+	}
+	mc.memberLevel[200] = 40 // Maintainer -> "maintain"
+	mc.issue[1] = &Issue{IID: 1, Author: UserRef{ID: 99}}
+	p := newEventsPoller(mc)
+
+	event := RoutableEvent{
+		Type:         "issue_label",
+		IID:          1,
+		Labels:       []string{"ready-to-code"},
+		ChangedLabel: "ready-to-code",
+	}
+
+	ne, authorID, err := p.toNormalizedEvent(context.Background(), event)
+	if err != nil {
+		t.Fatalf("bot-applied label should not be filtered: %v", err)
+	}
+	if authorID != 200 {
+		t.Errorf("authorID = %d, want 200", authorID)
+	}
+	if ne.Transition.Kind != "label_changed" {
+		t.Errorf("Transition.Kind = %q, want %q", ne.Transition.Kind, "label_changed")
+	}
+	if ne.Transition.Label == nil {
+		t.Fatal("expected Transition.Label to be set")
+	}
+	if ne.Transition.Label.Name != "ready-to-code" {
+		t.Errorf("Label.Name = %q, want %q", ne.Transition.Label.Name, "ready-to-code")
+	}
+	if ne.Actor.ID != "project_1_bot_abc" {
+		t.Errorf("Actor.ID = %q, want %q", ne.Actor.ID, "project_1_bot_abc")
+	}
+	if ne.Actor.Kind != "bot" {
+		t.Errorf("Actor.Kind = %q, want %q", ne.Actor.Kind, "bot")
+	}
+	if ne.Actor.Role != "maintain" {
+		t.Errorf("Actor.Role = %q, want %q", ne.Actor.Role, "maintain")
+	}
+}
+
+func TestToNormalizedEvent_IssueLabel_ProjectAccessTokenBot(t *testing.T) {
+	mc := newMockClient()
+	mc.labelEvents[1] = []ResourceLabelEvent{
+		{
+			ID:     100,
+			Action: "add",
+			Label: struct {
+				Name string `json:"name"`
+			}{Name: "ready-for-review"},
+			User: UserRef{ID: 100, Username: "project_42_bot_xyz", Bot: false},
+		},
+	}
+	mc.memberLevel[100] = 40
+	mc.issue[1] = &Issue{IID: 1, Author: UserRef{ID: 99}}
+	p := newEventsPoller(mc) // botUserID = 100
+
+	event := RoutableEvent{
+		Type:         "issue_label",
+		IID:          1,
+		Labels:       []string{"ready-for-review"},
+		ChangedLabel: "ready-for-review",
+	}
+
+	ne, authorID, err := p.toNormalizedEvent(context.Background(), event)
+	if err != nil {
+		t.Fatalf("project-access-token bot label should not be filtered: %v", err)
+	}
+	if authorID != 100 {
+		t.Errorf("authorID = %d, want 100", authorID)
+	}
+	if ne.Actor.Kind != "bot" {
+		t.Errorf("Actor.Kind = %q, want %q", ne.Actor.Kind, "bot")
+	}
+	if ne.Actor.ID != "project_42_bot_xyz" {
+		t.Errorf("Actor.ID = %q, want %q", ne.Actor.ID, "project_42_bot_xyz")
+	}
+	if ne.Transition.Label == nil {
+		t.Fatal("expected Transition.Label to be set")
+	}
+	if ne.Transition.Label.Name != "ready-for-review" {
+		t.Errorf("Label.Name = %q, want %q", ne.Transition.Label.Name, "ready-for-review")
+	}
+}
+
 func TestToNormalizedEvent_MRNote(t *testing.T) {
 	mc := newMockClient()
 	mc.memberLevel[42] = 30
