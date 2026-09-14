@@ -1332,11 +1332,19 @@ func TestParseClaudeStreamFinalTokensEventOnCancel(t *testing.T) {
 // TokensEvent still fires with the cumulative snapshot. This is a regression
 // test for the flag-before-validation ordering bug (#6932): seenResult must
 // not be set before the unmarshal succeeds.
+//
+// Total per-message tokens: 1000+300+200+50 = 1550, below the 5000
+// tokenThreshold, so the message_delta handler does not emit an incremental
+// TokensEvent. This ensures the only TokensEvent observed is the deferred
+// one, which fires solely based on seenResult's value. If seenResult were
+// set before the unmarshal (reintroducing the #6932 bug), the deferred
+// TokensEvent would never fire and this test would correctly fail.
 func TestParseClaudeStreamMalformedResultFallsBackToTokensEvent(t *testing.T) {
 	lines := []string{
-		// Token data from a normal API call.
-		`{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":3000,"cache_read_input_tokens":400,"cache_creation_input_tokens":100}}}}`,
-		`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":1600}}}`,
+		// Token data from a normal API call, kept below tokenThreshold so no
+		// incremental TokensEvent is emitted during message_delta.
+		`{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":50}}}}`,
+		`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":300}}}`,
 		// Malformed result event: valid outer JSON with type "result", but
 		// usage is a string instead of an object, causing unmarshal to fail.
 		`{"type":"result","num_turns":5,"total_cost_usd":0.30,"usage":"not-an-object"}`,
@@ -1360,23 +1368,24 @@ func TestParseClaudeStreamMalformedResultFallsBackToTokensEvent(t *testing.T) {
 		t.Errorf("expected 0 ResultEvents from malformed result, got %d", len(results))
 	}
 
-	// The deferred TokensEvent must fire with the cumulative snapshot,
-	// because seenResult should NOT have been set.
-	if len(tokens) == 0 {
-		t.Fatal("expected deferred TokensEvent to fire when result unmarshal fails, got 0")
+	// Exactly one TokensEvent should fire: the deferred one. Because the
+	// fixture total stays under tokenThreshold, this can only be the
+	// deferred event, which fires only when seenResult was NOT set.
+	if len(tokens) != 1 {
+		t.Fatalf("expected exactly 1 deferred TokensEvent when result unmarshal fails, got %d", len(tokens))
 	}
 
-	last := tokens[len(tokens)-1]
-	if last.InputTokens != 3000 {
-		t.Errorf("expected 3000 input tokens, got %d", last.InputTokens)
+	last := tokens[0]
+	if last.InputTokens != 1000 {
+		t.Errorf("expected 1000 input tokens, got %d", last.InputTokens)
 	}
-	if last.OutputTokens != 1600 {
-		t.Errorf("expected 1600 output tokens, got %d", last.OutputTokens)
+	if last.OutputTokens != 300 {
+		t.Errorf("expected 300 output tokens, got %d", last.OutputTokens)
 	}
-	if last.CacheRead != 400 {
-		t.Errorf("expected 400 cache read tokens, got %d", last.CacheRead)
+	if last.CacheRead != 200 {
+		t.Errorf("expected 200 cache read tokens, got %d", last.CacheRead)
 	}
-	if last.CacheWrite != 100 {
-		t.Errorf("expected 100 cache write tokens, got %d", last.CacheWrite)
+	if last.CacheWrite != 50 {
+		t.Errorf("expected 50 cache write tokens, got %d", last.CacheWrite)
 	}
 }
