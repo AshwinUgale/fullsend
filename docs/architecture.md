@@ -311,7 +311,7 @@ The existing design principle is that [the repo is the coordinator](problems/age
   `conversation.Client` — not a separate always-on chat bot and not an extension
   of `forge.Client`
   ([ADR 0086](ADRs/0086-conversation-surface-for-agent-participation.md)).
-- Dispatch authorization gate: event-triggered paths authorize the prompting
+- Event-backed dispatch authorization: event-triggered paths authorize the prompting
   actor before dispatch. This includes schedule/manual dispatch represented as
   a `NormalizedEvent`, whose actor is the configured service identity. GitHub
   paths check the acting user's collaborator permission via the repository API
@@ -321,10 +321,12 @@ The existing design principle is that [the repo is the coordinator](problems/age
   resolution, with no cross-system identity verification
   ([Authorization Contract v1](normative/authorization/v1/);
   [ADR 0054](ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)).
-  Scheduled entity discovery has no scheduling principal: harness enablement
-  and platform policy permit evaluation, and trusted input-selection layers
-  ensure actor-originated instructions are authorized before use. Every run
-  uses the harness's configured agent identity and permissions
+- Poll entity-discovery authorization: `fullsend poll` has no prompting event
+  actor; trusted Fullsend-controlled invocation provenance authorizes entity
+  evaluation, and callers without that provenance are denied. Fullsend
+  minimizes unneeded dangerous entity data before CEL where fidelity permits;
+  trusted input-selection layers authorize retained actor-originated
+  instructions before use. Every run uses the harness's configured identity
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 
 **Open questions:**
@@ -332,6 +334,10 @@ The existing design principle is that [the repo is the coordinator](problems/age
 - What normative entity-history, query-planning, and handled-state contract
   can support entity-first harness evaluation without unbounded provider reads
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md))?
+- Is GitHub's event system sufficient for forge-native duplicate protection, or
+  do we need additional coordination beyond label/state conventions and agent
+  idempotency? (Jira polling per ADR 0063 uses entity-property locks and runner
+  lock refresh; ADR 0098 does not resolve this question.)
 - How does work assignment interact with the backlog/priority agent described in [agent-architecture.md](problems/agent-architecture.md)?
 - What happens when work needs to be cancelled, retried, or reassigned?
 - Does the coordinator need state (a queue, a lock, a claim system), or can it be stateless and event-driven?

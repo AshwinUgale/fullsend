@@ -29,6 +29,10 @@ no longer has to reconstruct changes as `NormalizedEvent` values. ADR 0063's
 poll command, driver architecture, per-repo scope, and coordination decisions
 remain current.
 
+Extends [ADR 0054](0054-require-authorization-on-all-agent-dispatch-paths.md)
+with a scoped authorization path for Fullsend-originated entity discovery that
+has no prompting event actor; event-backed dispatch authorization is unchanged.
+
 ## Context
 
 [ADR 0061](0061-harness-cel-dispatch.md) made a `NormalizedEvent` the sole CEL
@@ -70,7 +74,10 @@ state become platform responsibilities.
   therefore be evaluated without a prompting event MUST test `event != null`
   before accessing event fields. Harnesses without entity sources remain
   event-triggered only, always receive an event, and need no compatibility
-  change to existing event-based predicates.
+  change to existing event-based predicates. Trigger CEL represents a missing
+  event as CEL null; overlay `when` evaluation remains unchanged and uses an
+  empty map guarded with `has(event.source)` unless a later specification
+  intentionally unifies the two environments.
 - **Candidate sources:** Event-driven dispatch resolves the event's entity and
   supplies both values; scheduled discovery supplies the entity with `event`
   set to null. Events are a low-latency source of candidates, not the
@@ -93,14 +100,16 @@ state become platform responsibilities.
   scheduling machinery, not an authorization principal. Harness enablement and
   platform policy determine whether scheduled evaluation is permitted; every
   resulting run uses the harness's configured agent identity and permissions.
-- **Authorization:** A state-derived match such as staleness need not identify
-  a historical event. [ADR 0054](0054-require-authorization-on-all-agent-dispatch-paths.md)
-  continues to authorize event-triggered dispatch from the event actor. Entity
-  history remains untrusted input: trusted input-selection layers, including
-  harness pre-scripts, determine which actor-originated instructions are
-  authorized and actionable before they control agent behavior. Neither entity
-  content nor a historical actor can alter the run's configured identity or
-  permissions.
+- **Authorization:** [ADR 0054](0054-require-authorization-on-all-agent-dispatch-paths.md)
+  continues to authorize event-backed dispatch from its event actor. A
+  `fullsend poll` entity-discovery run is instead authorized by its trusted
+  Fullsend-controlled origin; callers that cannot establish that provenance are
+  denied. Entity history remains untrusted input. Fullsend filters or minimizes
+  dangerous data before CEL where the normalized entity contract permits,
+  while preserving required fidelity and actor provenance; trusted
+  input-selection layers, including harness pre-scripts, determine which
+  retained actor-originated instructions are actionable. Neither entity content
+  nor a historical actor can alter the run's configured identity or permissions.
 
 ## Consequences
 

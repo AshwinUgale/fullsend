@@ -153,6 +153,21 @@ permission of that identity on the target repository (typically `write`
 for installed apps). The standard authorization gate applies; the
 platform does not default schedule or manual actors to `role: none`.
 
+### Fullsend-originated entity discovery
+
+`fullsend poll` may perform scheduled entity discovery without synthesizing a
+`NormalizedEvent` or event actor. This path is authorized only when its caller
+has trusted Fullsend-controlled invocation provenance. A caller that cannot
+establish that provenance MUST be denied; external callers cannot assert it.
+
+Authorization of the poll origin does not authorize entity content. Before CEL
+evaluation, Fullsend MUST omit or minimize unneeded untrusted fields where the
+normalized entity contract permits, while retaining the state, content, and
+actor provenance required by the harness. Retained actor-originated content
+remains untrusted and MUST pass the harness's trusted input-selection layers
+before it controls agent behavior. Any resulting agent run uses the harness's
+configured identity and permissions.
+
 ## Excluded fields
 
 The following fields are **not** authorization evidence and must not be
@@ -171,15 +186,21 @@ relationships.
 
 ## Enforcement point
 
-Authorization is enforced as a **platform-level gate** inside
-`fullsend dispatch`, after `NormalizedEvent` normalization and **before**
-CEL trigger evaluation.
+Authorization is enforced as a **platform-level gate** before CEL trigger
+evaluation. Event-backed dispatch uses the normalized event actor;
+Fullsend-originated entity discovery uses trusted invocation provenance.
 
 ```
 Forge event
   --> NormalizedEvent (adapter)
-  --> Authorization gate (this contract)    <-- enforced here
+  --> Event-actor authorization gate        <-- enforced here
   --> CEL trigger evaluation (harness routing)
+  --> Execution
+
+Fullsend poll invocation
+  --> Trusted-origin authorization gate     <-- enforced here
+  --> Entity enumeration, resolution, and minimization
+  --> CEL trigger evaluation (event is null)
   --> Execution
 ```
 
