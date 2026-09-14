@@ -23,7 +23,7 @@ Date: 2026-06-18
 Accepted
 
 The requirement for poll drivers to reconstruct changes as events is
-superseded by [ADR 0106](0106-entity-first-harness-evaluation.md). The poll
+superseded by [ADR 0098](0098-entity-first-harness-evaluation.md). The poll
 command, driver architecture, per-repo scope, and coordination decisions remain
 current.
 

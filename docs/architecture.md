@@ -149,9 +149,13 @@ repo baseline and overrides)
   Branch-targeting logic lives in the portable post-script, not in workflow
   YAML ([ADR 0053](ADRs/0053-agent-driven-branch-targeting.md)).
 - Harness trigger expressions: each harness may declare an optional CEL
-  `trigger` boolean evaluated against a forge-neutral `NormalizedEvent`.
-  `fullsend dispatch` matches events to harnesses via input/output drivers
-  ([ADR 0061](ADRs/0061-harness-cel-dispatch.md)).
+  `trigger` boolean evaluated against a required forge-neutral normalized
+  entity and an optional prompting `NormalizedEvent`. `fullsend dispatch`
+  resolves each event's entity before matching; scheduled discovery evaluates
+  resolved entities with no prompting event. Harnesses without entity sources
+  remain event-triggered only and may rely on the event being present
+  ([ADR 0061](ADRs/0061-harness-cel-dispatch.md), partially superseded by
+  [ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 - Portable provider and profile resolution: provider and profile definitions
   can be URL-referenced (sha256-pinned) or specified as local file paths in
   the harness, enabling portable base harnesses that carry their own
@@ -293,9 +297,9 @@ The existing design principle is that [the repo is the coordinator](problems/age
   an optional prompting event. Webhooks provide low-latency candidates;
   `fullsend poll` and its input drivers enumerate and resolve scheduled
   candidates without reconstructing a complete event stream. Entity activity
-  retains actor and authorization provenance, while durable per-harness
-  processing receipts distinguish handled work
-  ([ADR 0106](ADRs/0106-entity-first-harness-evaluation.md), partially
+  retains actor and authorization provenance, while harness-defined evidence —
+  existing entity activity or explicit receipts — distinguishes handled work
+  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md), partially
   superseding [ADR 0063](ADRs/0063-polling-based-work-discovery.md)).
 - GitLab dispatch uses cron-polled scheduled pipelines for issue/comment/label events and native `merge_request_event` for MR events. No webhook bridge required (see [ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md)).
 - Conversation participation: GitHub Discussions (and future chat systems) enter
@@ -307,21 +311,24 @@ The existing design principle is that [the repo is the coordinator](problems/age
   `conversation.Client` — not a separate always-on chat bot and not an extension
   of `forge.Client`
   ([ADR 0086](ADRs/0086-conversation-surface-for-agent-participation.md)).
-- Dispatch authorization gate: all agent dispatch paths — slash commands
-  and automatic event triggers — require authorization before dispatching.
-  GitHub paths check the acting user's collaborator permission via the
-  repository API (`write` or above for mutation commands; `triage` or above
-  for observation stages). Non-GitHub dispatch paths (e.g., Jira polling)
-  map source-system roles to dispatch authorization roles (`read`, `write`,
-  `admin`) using source-native role resolution; the resolved role feeds the
-  same authorization gate with no cross-system identity verification
-  ([ADR 0054](ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)).
+- Dispatch authorization gate: event-triggered paths authorize the prompting
+  actor before dispatch. GitHub paths check the acting user's collaborator
+  permission via the repository API (`write` or above for mutation commands;
+  `triage` or above for observation stages). Non-GitHub event paths map
+  source-system roles to dispatch authorization roles (`read`, `write`,
+  `admin`) using source-native role resolution, with no cross-system identity
+  verification ([ADR 0054](ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)).
+  Scheduled entity discovery has no scheduling principal: harness enablement
+  and platform policy permit evaluation, and trusted input-selection layers
+  ensure actor-originated instructions are authorized before use. Every run
+  uses the harness's configured agent identity and permissions
+  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 
 **Open questions:**
 
-- What normative entity-history, query-planning, and processing-receipt contract
+- What normative entity-history, query-planning, and handled-state contract
   can support entity-first harness evaluation without unbounded provider reads
-  ([ADR 0106](ADRs/0106-entity-first-harness-evaluation.md))?
+  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md))?
 - How does work assignment interact with the backlog/priority agent described in [agent-architecture.md](problems/agent-architecture.md)?
 - What happens when work needs to be cancelled, retried, or reassigned?
 - Does the coordinator need state (a queue, a lock, a claim system), or can it be stateless and event-driven?
