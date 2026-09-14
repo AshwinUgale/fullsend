@@ -326,13 +326,49 @@ func recordingProvidersStub(t *testing.T) string {
 	t.Setenv("TMPDIR", t.TempDir())
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "openshell.log")
+	profilesState := logPath + ".profiles"
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + shellQuoteForTest(logPath) + "\n" +
+		"STATE=" + shellQuoteForTest(profilesState) + "\n" +
 		"case \"$1 $2\" in\n" +
 		"  'gateway list') echo default-gateway; exit 0 ;;\n" +
 		"  'settings '*) exit 0 ;;\n" +
-		"  'provider list-profiles') echo '    fullsend-openai  Fullsend OpenAI  endpoints: 1'; exit 0 ;;\n" +
-		"  'provider profile'|'provider create'|'provider update') exit 0 ;;\n" +
+		// Track imported profile ids so list-profiles can satisfy
+		// ImportProfileVerified (Forget -> import -> ProfileExists), mirroring
+		// testdata/providers-stub instead of a fixed id.
+		"  'provider list-profiles')\n" +
+		"    printf '['\n" +
+		"    first=1\n" +
+		"    if [ -f \"$STATE\" ]; then\n" +
+		"      while IFS= read -r id; do\n" +
+		"        [ -n \"$id\" ] || continue\n" +
+		"        if [ \"$first\" -eq 1 ]; then first=0; else printf ','; fi\n" +
+		"        printf '{\"id\":\"%s\"}' \"$id\"\n" +
+		"      done < \"$STATE\"\n" +
+		"    fi\n" +
+		"    printf ']\\n'\n" +
+		"    exit 0 ;;\n" +
+		"  'provider profile')\n" +
+		"    case \"$3\" in\n" +
+		"      delete)\n" +
+		"        if [ -n \"$4\" ] && [ -f \"$STATE\" ]; then\n" +
+		"          grep -v \"^$4$\" \"$STATE\" > \"$STATE.tmp\" || true\n" +
+		"          mv \"$STATE.tmp\" \"$STATE\"\n" +
+		"        fi\n" +
+		"        exit 0 ;;\n" +
+		"      import)\n" +
+		"        prev=\"\"\n" +
+		"        for arg in \"$@\"; do\n" +
+		"          if [ \"$prev\" = '--file' ] && [ -f \"$arg\" ]; then\n" +
+		"            id=$(awk '/^id:/{print $2; exit}' \"$arg\")\n" +
+		"            [ -n \"$id\" ] && printf '%s\\n' \"$id\" >> \"$STATE\"\n" +
+		"          fi\n" +
+		"          prev=\"$arg\"\n" +
+		"        done\n" +
+		"        exit 0 ;;\n" +
+		"    esac\n" +
+		"    exit 0 ;;\n" +
+		"  'provider create'|'provider update') exit 0 ;;\n" +
 		// Like OpenShell 0.0.83: a provider cannot be deleted while a sandbox
 		// still references it, so track the sandbox in a marker file.
 		"  'provider delete') if [ -e " + shellQuoteForTest(logPath+".sandbox") + " ]; then echo \"error: provider '$3' is attached to sandbox(es): fs-x\" >&2; exit 1; fi; exit 0 ;;\n" +
