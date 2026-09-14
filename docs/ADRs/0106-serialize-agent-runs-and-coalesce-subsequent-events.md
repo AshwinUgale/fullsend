@@ -22,12 +22,13 @@ Accepted
 
 ## Context
 
-Agent workflows currently use concurrency groups that cancel an in-progress run
-when a later event triggers the same agent for the same issue, pull request, or
-other subject. Cancellation wastes the inference and sandbox work already
-performed. It also makes a burst of related events behave as competing
-replacements: for example, several user comments may each cancel a run instead
-of letting the agent finish and then consider the accumulated concerns.
+Agent execution currently uses platform-specific concurrency controls that may
+cancel an in-progress run when a later event triggers the same agent for the
+same issue, merge or pull request, or other subject. Cancellation wastes the
+inference and sandbox work already performed. It also makes a burst of related
+events behave as competing replacements: for example, several user comments
+may each cancel a run instead of letting the agent finish and then consider the
+accumulated concerns.
 
 [ADR 0098](0098-entity-first-harness-evaluation.md) makes durable entity state
 and activity available to harnesses that declare entity sources. Such harnesses
@@ -71,18 +72,38 @@ next agent run reconciles all current concerns on the subject.
 
 Adopt preserve-and-coalesce scheduling for automatic agent triggers. Every event
 still follows the normal input-driver normalization, authorization, harness
-selection, and CEL trigger path. A matching run enters a concurrency group keyed
-by harness and stable normalized-event subject. An event that fails
+selection, and CEL trigger path. A matching run enters a platform serialization
+scope keyed by harness and stable normalized-event subject. An event that fails
 authorization or does not match the harness trigger creates no pending run.
 
 The execution platform MUST allow the active run to finish and coalesce later
 matching events into one pending run representing the newest retained event.
-GitHub Actions provides these semantics with a subject-scoped concurrency group,
-`cancel-in-progress: false`, and its default single-pending queue
+All execution layers that share responsibility for serialization MUST use a
+compatible key and active-run cancellation policy. Integrations that cannot
+provide the complete invariant natively MUST emulate the missing behavior
+outside the agent execution process.
+
+On GitHub Actions, the serialization scope is a subject-scoped `concurrency`
+group. Setting `cancel-in-progress: false` preserves the active run, while the
+platform's single-pending behavior replaces an older pending run with the newest
 ([GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)).
-All workflow layers that share responsibility for agent concurrency MUST use
-compatible groups and cancellation settings. Integrations for platforms without
-equivalent semantics MUST emulate them outside the agent execution process.
+Fullsend's reusable GitHub workflows currently use subject-scoped agent-stage
+concurrency groups with `cancel-in-progress: true`; implementing this decision
+requires changing that setting to `false` and keeping every participating
+workflow layer on the same key.
+
+On GitLab CI/CD, a subject-scoped `resource_group` serializes agent jobs.
+`workflow:auto_cancel:on_new_commit: none` and a non-interruptible agent job
+preserve active work, while the resource group's `newest_first` process mode
+selects the newest waiting pipeline next
+([GitLab resource groups](https://docs.gitlab.com/ci/resource_groups/),
+[GitLab auto-cancel](https://docs.gitlab.com/ci/yaml/#workflowauto_cancelon_new_commit)).
+Fullsend already uses `fullsend-${STAGE}-${RESOURCE_KEY}` resource groups, sets
+their process mode to `newest_first`, and configures `on_new_commit: none` when
+it can do so without overwriting repository policy. GitLab nevertheless retains
+all waiting jobs rather than coalescing them into one slot, so the GitLab
+integration must cancel superseded waiters through the API or avoid creating
+them in the dispatch path to satisfy this decision.
 
 Each agent run MUST reconcile the subject's current state rather than assume the
 triggering event describes all outstanding work. The retained event may still
@@ -103,8 +124,9 @@ security controls remain in force.
 
 - Agent work already in progress completes, and bursts produce at most one
   follow-up run at a time, reducing token and sandbox waste.
-- GitHub Actions can implement the policy without a poll driver or a new
-  `fullsend run` event protocol; other platforms may require extra coordination.
+- GitHub Actions provides the full invariant natively; GitLab provides active-run
+  preservation, serialization, and newest-first ordering but needs integration
+  work to discard superseded waiting jobs.
 - Agents must inspect current subject state, while transient intermediate events
   that leave no durable state may be lost.
 - Trigger authorization remains deterministic, but authority over other content
