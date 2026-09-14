@@ -17,7 +17,7 @@ Add one when a **user-visible workflow** must be verified end-to-end (dispatch �
 Shared framework (importable by external repos):
 
 ```
-pkg/behaviourtest/
+pkg/behaviourtest/   # RunSuite public entry (build tag: behaviour)
   world/             # Scenario state
   steps/             # Step definitions + CleanupScenario
   artifacts/         # Artifact lookup helpers
@@ -32,7 +32,7 @@ In-repo runner and scenarios:
 e2e/behaviour/
   features/          # Portable Gherkin scenarios
   fixtures/          # Static content for write_fixture ops
-  suite_test.go      # Thin godog entry (build tag: behaviour)
+  suite_test.go      # Thin RunSuite caller (build tag: behaviour)
 ```
 
 ## Writing scenarios
@@ -231,6 +231,8 @@ The After hook calls `Driver.DeallocateRepo` to return the slot. `Driver.Finaliz
 
 Concurrent callers for the same repo are serialized via `singleflight.Group` — only one goroutine runs the create+install flow while others wait. This removes the requirement for numbered `test-repo-NN` repos to be pre-provisioned in the pool org.
 
+**Credential context separation:** The suite's e2e installation token and dispatch's per-repo `GITHUB_TOKEN` are distinct credential contexts with independent permission propagation graphs. After a pool repo is deleted and recreated, the suite can confirm the repo exists (via `GetRepo`), but it **cannot** observe or predict when dispatch-side collaborator permissions will be ready. Do not add `GetCollaboratorPermission` polling to the suite-side readiness checks — the suite's token resolves permissions through a different GitHub subsystem than dispatch's token. See the [package doc comment](../../../pkg/behaviourtest/drivers/install/doc.go) for details and the empirical evidence from [#6701](https://github.com/fullsend-ai/fullsend/issues/6701).
+
 **Suite duration:** Because each leased `test-repo-NN` pays create + inference provision + `github setup` on first use in a run, serial godog suites take longer than the old shared-`test-repo` model. CI budgets **45 minutes** for the behaviour job (`timeout-minutes` and `go test -timeout`) to match.
 
 Runner env (defaults shown):
@@ -239,6 +241,7 @@ Runner env (defaults shown):
 BEHAVIOUR_SCM=github              # also: gitlab; future: forgejo
 BEHAVIOUR_CI=githubactions        # also: gitlabci; future: tekton
 BEHAVIOUR_INSTALL_MODE=per-repo
+BEHAVIOUR_ARTIFACT_DIR=        # CI upload-artifact root for debug logs and run artifacts; temp dir when unset
 ENVIRONMENT=dev               # mint/infra target: dev (default, local and PRs) or stage (push to main)
 E2E_GCP_PROJECT_ID=...        # inference project; install runs inference provision per pool repo
 E2E_GCP_WIF_PROVIDER=...      # CI job GCP auth (not written to pool test-repo secrets)
@@ -248,6 +251,8 @@ TEST_ACTOR_OUTSIDER_PAT=...   # outsider human-like actor PAT (no org write on b
 ```
 
 `ENVIRONMENT` is `dev` or `stage`. Local runs default to `dev` when unset. CI sets it to match the GitHub Environment on the behaviour job (`dev` on pull requests and the merge queue, `stage` on push to `main`).
+
+When `ENVIRONMENT=stage`, the suite selects the `RepoPoolCFMintStage` driver which deploys a durable CF Worker mint at `stage-mint.fullsend.sh` and uses the `halfsend` org with a non-vendored per-repo install (referencing main HEAD via `--fullsend-ref=main`). The `halfsend` org uses the same repo pool pattern as the DEV pool orgs.
 
 Triage scenarios apply the `ready-for-triage` label (not `/fs-triage` comments) because the per-repo shim ignores `issue_comment` events from bot users and CI uses minted e2e installation tokens.
 
@@ -260,9 +265,9 @@ The three test actor accounts (`fstest-write`, `fstest-triage`, `fstest-outsider
 | fullsend-ai org member | No | No | No |
 | Permission on `fullsend-ai/fullsend` | Read | Read | Read |
 | Permission on `fullsend-ai/agents` | Read | Read | Read |
-| Write access | Pool-org `test-repo-NN` repos only | Pool-org `test-repo-NN` repos only | None (outsider) |
+| Write access | Pool-org `test-repo-NN` repos (DEV) and `halfsend/test-repo-NN` repos (STAGE) | Pool-org `test-repo-NN` repos (DEV) and `halfsend/test-repo-NN` repos (STAGE) | None (outsider) |
 
-**Blast-radius containment:** All three accounts hold classic PATs. Because the accounts are not members of the `fullsend-ai` org and have only read permission on production repositories (`fullsend-ai/fullsend`, `fullsend-ai/agents`), a compromised PAT cannot push commits, merge PRs, or modify settings on any production repo. Write capability is scoped exclusively to disposable `test-repo-NN` infrastructure in the pool org, which is ephemeral and rebuilt each CI run.
+**Blast-radius containment:** All three accounts hold classic PATs. Because the accounts are not members of the `fullsend-ai` org and have only read permission on production repositories (`fullsend-ai/fullsend`, `fullsend-ai/agents`), a compromised PAT cannot push commits, merge PRs, or modify settings on any production repo. Write capability is scoped exclusively to disposable `test-repo-NN` infrastructure in the DEV pool orgs (ephemeral, rebuilt each CI run) and the `halfsend` STAGE org (durable repos reused across runs). No write access extends beyond these test-only organisations.
 
 **Re-verification guidance:** Re-verify account permissions whenever:
 
@@ -434,13 +439,39 @@ External behaviour runners import the shared libraries from this module:
 require github.com/fullsend-ai/fullsend v0.x.y // released tag, not @main
 ```
 
-- Import `github.com/fullsend-ai/fullsend/pkg/behaviourtest/...` for world, steps, drivers, and `suite.InitScenario`.
-- Import `github.com/fullsend-ai/fullsend/pkg/e2etest` for org pool acquisition, env config, CLI build/run, and cleanup.
-- Set `world.FixturesRoot` to the module-relative fixtures directory (e.g. `"behaviour"` in the agents repo).
-- Build the fullsend CLI with `e2etest.BuildModuleBinary(t, "github.com/fullsend-ai/fullsend")` — not `BuildCLIBinary`, which resolves the **current** module root.
-- Run with `-tags behaviour` and the same env vars as CI (see above).
+The supported entry point is `behaviourtest.RunSuite`. Driver selection, org acquisition, CLI build, concurrency, tags, and step registration are handled internally from the same environment variables as the in-repo suite (`BEHAVIOUR_SCM`, `BEHAVIOUR_CI`, `BEHAVIOUR_INSTALL_MODE`, `ENVIRONMENT`, `BEHAVIOUR_CAPABILITIES`, `GODOG_TAGS`, `GODOG_CONCURRENCY`):
+
+```go
+//go:build behaviour
+
+package behaviour_test
+
+import (
+    "testing"
+
+    "github.com/fullsend-ai/fullsend/pkg/behaviourtest"
+)
+
+func TestBehaviourSuite(t *testing.T) {
+    behaviourtest.RunSuite(t, behaviourtest.SuiteOptions{
+        FeaturePaths: []string{"features"},
+        FixturesRoot: "behaviour", // module-relative; "e2e/behaviour" in this repo
+    })
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `FeaturePaths` | Godog feature file or directory paths, relative to the test working directory |
+| `FixturesRoot` | Module-relative directory that contains `fixtures/` |
+
+`RunSuite` builds the CLI from module `github.com/fullsend-ai/fullsend` (equivalent to `e2etest.BuildModuleBinary`), so the caller's module root is not used. Run with `-tags behaviour` and the same env vars as CI (see above).
+
+Lower-level packages (`world`, `steps`, `drivers`, `suite.InitScenario`, `pkg/e2etest`) remain available for custom bootstraps. Prefer `RunSuite` unless you need to inject drivers the env-based selector does not cover.
 
 ### API changes
+
+**`behaviourtest.RunSuite`:** New high-level entry point. Callers pass `SuiteOptions{FeaturePaths, FixturesRoot}` only. Replaces the ~80-line bootstrap previously duplicated in `e2e/behaviour/suite_test.go`.
 
 **`suite.InitScenario` signature change:** The function signature changed from `InitScenario(sc, template, pool)` to `InitScenario(sc, template)`. The `*world.RepoPool` type has been removed. Repo leasing is handled internally by the unified `install.Driver` on `template.Driver`. Callers construct a `Driver` via a `Factory` and set it on the template World:
 

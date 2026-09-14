@@ -3,6 +3,7 @@ package scaffold
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -184,6 +185,15 @@ type callerPair struct {
 	jobName      string // job key in the caller workflow
 }
 
+var workflowCallPairs = []callerPair{
+	{"scaffold/triage.yml", loadRenderedScaffoldCaller(".github/workflows/triage.yml"), "triage"},
+	{"scaffold/code.yml", loadRenderedScaffoldCaller(".github/workflows/code.yml"), "code"},
+	{"scaffold/review.yml", loadRenderedScaffoldCaller(".github/workflows/review.yml"), "review"},
+	{"scaffold/fix.yml", loadRenderedScaffoldCaller(".github/workflows/fix.yml"), "fix"},
+	{"scaffold/retro.yml", loadRenderedScaffoldCaller(".github/workflows/retro.yml"), "retro"},
+	{"scaffold/prioritize.yml", loadRenderedScaffoldCaller(".github/workflows/prioritize.yml"), "prioritize"},
+}
+
 func loadRenderedScaffoldCaller(path string) func(t *testing.T) []byte {
 	return func(t *testing.T) []byte {
 		t.Helper()
@@ -217,20 +227,10 @@ func loadRepoFile(relPath string) func(t *testing.T) []byte {
 // inputs and secrets declared by the reusable workflow it calls, and does not
 // pass any inputs/secrets the reusable workflow doesn't declare.
 func TestWorkflowCallInputAlignment(t *testing.T) {
-	// All thin callers in the scaffold that reference reusable workflows.
-	pairs := []callerPair{
-		{"scaffold/triage.yml", loadRenderedScaffoldCaller(".github/workflows/triage.yml"), "triage"},
-		{"scaffold/code.yml", loadRenderedScaffoldCaller(".github/workflows/code.yml"), "code"},
-		{"scaffold/review.yml", loadRenderedScaffoldCaller(".github/workflows/review.yml"), "review"},
-		{"scaffold/fix.yml", loadRenderedScaffoldCaller(".github/workflows/fix.yml"), "fix"},
-		{"scaffold/retro.yml", loadRenderedScaffoldCaller(".github/workflows/retro.yml"), "retro"},
-		{"scaffold/prioritize.yml", loadRenderedScaffoldCaller(".github/workflows/prioritize.yml"), "prioritize"},
-	}
-
 	// Note: reusable-dispatch.yml stage jobs are no longer validated here
 	// (ADR 62: stages inlined, no external uses:)
 
-	for _, pair := range pairs {
+	for _, pair := range workflowCallPairs {
 		t.Run(pair.callerName, func(t *testing.T) {
 			callerContent := pair.callerSource(t)
 
@@ -284,6 +284,63 @@ func TestWorkflowCallInputAlignment(t *testing.T) {
 	}
 }
 
+// TestReusableWorkflowInputContractAlignment validates required/default/type
+// alignment for every input shared by reusable-dispatch.yml and each
+// standalone reusable stage workflow. The project_number contract is covered
+// by the same generic comparison as every other shared input.
+func TestReusableWorkflowInputContractAlignment(t *testing.T) {
+	dispatchContent, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "reusable-dispatch.yml"))
+	require.NoError(t, err)
+
+	var dispatch reusableWorkflow
+	require.NoError(t, yaml.Unmarshal(dispatchContent, &dispatch))
+
+	for _, pair := range workflowCallPairs {
+		t.Run(pair.callerName, func(t *testing.T) {
+			callerContent := pair.callerSource(t)
+			var caller callerWorkflow
+			require.NoError(t, yaml.Unmarshal(callerContent, &caller))
+
+			job, ok := caller.Jobs[pair.jobName]
+			require.True(t, ok, "job %q not found in caller workflow", pair.jobName)
+			match := reusableWorkflowRef.FindString(job.Uses)
+			require.NotEmpty(t, match, "could not extract reusable workflow filename from uses: %q", job.Uses)
+
+			stageContent, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", match))
+			require.NoError(t, err, "could not read reusable workflow %s", match)
+
+			var stage reusableWorkflow
+			require.NoError(t, yaml.Unmarshal(stageContent, &stage))
+
+			for name, dispatchInput := range dispatch.On.WorkflowCall.Inputs {
+				stageInput, shared := stage.On.WorkflowCall.Inputs[name]
+				if !shared {
+					continue
+				}
+				if name == "install_mode" {
+					// Dispatch defaults to per-repo; standalone stage workflows
+					// default to per-org until that deprecated chain is removed.
+					assert.False(t, dispatchInput.Required,
+						"reusable-dispatch.yml install_mode must remain optional")
+					assert.Equal(t, "per-repo", dispatchInput.Default,
+						"reusable-dispatch.yml install_mode default changed")
+					assert.False(t, stageInput.Required,
+						"%s install_mode must remain optional", match)
+					assert.Equal(t, "per-org", stageInput.Default,
+						"%s install_mode default changed", match)
+					continue
+				}
+				assert.Equal(t, dispatchInput.Required, stageInput.Required,
+					"%s input %q required flag must match reusable-dispatch.yml", match, name)
+				assert.Equal(t, dispatchInput.Default, stageInput.Default,
+					"%s input %q default must match reusable-dispatch.yml", match, name)
+				assert.Equal(t, dispatchInput.Type, stageInput.Type,
+					"%s input %q type must match reusable-dispatch.yml", match, name)
+			}
+		})
+	}
+}
+
 // TestReusableWorkflowsShareCommonInputs validates that all reusable stage
 // workflows declare the same base set of inputs and secrets, catching drift
 // when a new input is added to some workflows but not others.
@@ -332,23 +389,85 @@ func TestReusableWorkflowsShareCommonInputs(t *testing.T) {
 	}
 }
 
-// TestReusableDispatchProjectNumberInput validates that reusable-dispatch.yml
-// declares project_number as an input and threads it to the prioritize job.
-func TestReusableDispatchProjectNumberInput(t *testing.T) {
+// TestProjectNumberInputsAreOptional validates that workflows accepting an
+// optional project board consistently allow comment-only prioritization.
+func TestProjectNumberInputsAreOptional(t *testing.T) {
+	for _, name := range []string{"reusable-dispatch.yml", "reusable-prioritize.yml"} {
+		t.Run(name, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name))
+			require.NoError(t, err)
+
+			var wf reusableWorkflow
+			require.NoError(t, yaml.Unmarshal(content, &wf))
+
+			input, ok := wf.On.WorkflowCall.Inputs["project_number"]
+			require.True(t, ok, "%s should declare project_number input", name)
+			assert.False(t, input.Required, "%s project_number should allow comment-only prioritization", name)
+			assert.Empty(t, input.Default, "%s project_number should default to empty", name)
+		})
+	}
+
 	content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "reusable-dispatch.yml"))
 	require.NoError(t, err)
 
-	var wf reusableWorkflow
-	require.NoError(t, yaml.Unmarshal(content, &wf))
-
-	input, ok := wf.On.WorkflowCall.Inputs["project_number"]
-	require.True(t, ok, "reusable-dispatch.yml should declare project_number input")
-	assert.False(t, input.Required, "project_number should be optional (not all orgs use prioritize)")
-
 	// Verify the prioritize job uses it (ADR 62: env var, not with:).
 	s := string(content)
-	assert.True(t, strings.Contains(s, "PRIORITIZE_PROJECT_NUMBER: ${{ inputs.project_number }}"),
+	assert.Contains(t, s, "PRIORITIZE_PROJECT_NUMBER: ${{ inputs.project_number }}",
 		"prioritize job should thread project_number to PRIORITIZE_PROJECT_NUMBER env var")
+}
+
+// TestReusableDispatchFixInstructionNormalizesCRLF validates that CRLF line endings
+// in a comment body are stripped before the fix instruction is written to GITHUB_OUTPUT.
+func TestReusableDispatchFixInstructionNormalizesCRLF(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "reusable-dispatch.yml"))
+	require.NoError(t, err)
+
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(content, &workflow))
+
+	var script string
+	for _, step := range workflow.Jobs["fix"].Steps {
+		if step.Name == "Extract PR number and context" {
+			script = step.Run
+			break
+		}
+	}
+	require.NotEmpty(t, script)
+
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"gh":      "#!/bin/sh\nprintf '[]\\n'\n",
+		"openssl": "#!/bin/sh\nprintf 'fixed-delimiter\\n'\n",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755))
+	}
+	outputPath := filepath.Join(dir, "github-output")
+	payload := `{"pull_request":{"number":42,"head":{"ref":"fix-branch"},"base":{"ref":"main"}},"comment":{"body":"/fs-fix\r\nChange A\r\nChange B"}}`
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"EVENT_PAYLOAD="+payload,
+		"INPUT_PR_NUMBER=",
+		"INPUT_INSTRUCTION=",
+		"TRIGGER_SOURCE=contributor",
+		"SOURCE_REPO=fullsend-ai/fullsend",
+		"GITHUB_OUTPUT="+outputPath,
+	)
+	result, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", result)
+
+	output, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(output), "instruction<<INSTRUCTION_fixed-delimiter\nChange A\nChange B\nINSTRUCTION_fixed-delimiter\n")
+	assert.NotContains(t, string(output), "\r")
 }
 
 // TestOTELHeadersSecretThreading validates that the optional OTLP headers
