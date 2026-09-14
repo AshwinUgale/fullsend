@@ -146,7 +146,7 @@ The `stage` input to `dispatch.yml` becomes optional. When provided
   same issue/PR. In practice, only one agent should run per issue/PR at a
   time, and the latest event takes priority.
 
-> **Update (2026-09):** [ADR 0098](0098-serialize-agent-runs-and-coalesce-subsequent-events.md)
+> **Update (2026-09):** [ADR 0106](0106-serialize-agent-runs-and-coalesce-subsequent-events.md)
 > replaces automatic cancellation with serialized runs and platform-native
 > pending-run coalescing.
 

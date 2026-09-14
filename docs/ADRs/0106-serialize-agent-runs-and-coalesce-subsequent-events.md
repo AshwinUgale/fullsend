@@ -1,5 +1,5 @@
 ---
-title: "98. Serialize agent runs and coalesce subsequent events"
+title: "106. Serialize agent runs and coalesce subsequent events"
 status: Accepted
 relates_to:
   - agent-architecture
@@ -12,7 +12,7 @@ topics:
   - events
 ---
 
-# 98. Serialize agent runs and coalesce subsequent events
+# 106. Serialize agent runs and coalesce subsequent events
 
 Date: 2026-09-02
 
@@ -28,6 +28,12 @@ other subject. Cancellation wastes the inference and sandbox work already
 performed. It also makes a burst of related events behave as competing
 replacements: for example, several user comments may each cancel a run instead
 of letting the agent finish and then consider the accumulated concerns.
+
+[ADR 0098](0098-entity-first-harness-evaluation.md) makes durable entity state
+and activity available to harnesses that declare entity sources. Such harnesses
+can tolerate skipped intermediate events by reconciling the entity on their next
+run instead of depending on every transition being delivered. Event-only
+harnesses cannot make the same assumption.
 
 The dispatch architecture already gives input drivers responsibility for
 producing forge-neutral `NormalizedEvent` values and gives each harness a CEL

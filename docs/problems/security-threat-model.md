@@ -407,7 +407,7 @@ DOS has elements that touch several existing threats:
 - ~~Should the event debouncing strategy from the March 31 concurrency
   discussion be treated as a DOS defense or purely a correctness concern?~~ It
   serves both purposes; the finish-and-coalesce policy is decided in
-  [ADR 0098](../ADRs/0098-serialize-agent-runs-and-coalesce-subsequent-events.md).
+  [ADR 0106](../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md).
 
 ## Cross-cutting concern: agent self-report unreliability
 

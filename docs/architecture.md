@@ -294,7 +294,7 @@ The existing design principle is that [the repo is the coordinator](problems/age
   pending run, and each run reconciles the subject's current state. Authority
   over other comments and content discovered during reconciliation remains a
   separate decision
-  ([ADR 0098](ADRs/0098-serialize-agent-runs-and-coalesce-subsequent-events.md)).
+  ([ADR 0106](ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md)).
 - Per-repo **polling** complements webhook dispatch: `fullsend poll` uses poll
   input drivers to discover work from remote systems (Jira first), coordinates
   via source-native write-then-verify locks, and feeds the same dispatch pipeline
@@ -342,7 +342,7 @@ The existing design principle is that [the repo is the coordinator](problems/age
 - How does work assignment interact with the backlog/priority agent described in [agent-architecture.md](problems/agent-architecture.md)?
 - How should explicit cancellation, retry, and reassignment interact with the
   automatic event-coalescing policy in
-  [ADR 0098](ADRs/0098-serialize-agent-runs-and-coalesce-subsequent-events.md)?
+  [ADR 0106](ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md)?
 - Does the coordinator need state (a queue, a lock, a claim system), or can it be stateless and event-driven?
 - When should a conversation or thread be linked to a work item (e.g. Discussion
   → issue) so a conversation-native agent can hand off to `/fs-code` without

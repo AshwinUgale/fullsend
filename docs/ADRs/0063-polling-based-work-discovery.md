@@ -356,7 +356,7 @@ still be safe to re-run (idempotent or gracefully no-op on repeat) as defense in
 depth — but polling does not impose a new idempotency requirement beyond what
 event-driven dispatch already assumes under `cancel-in-progress`.
 
-> **Update (2026-09):** [ADR 0098](0098-serialize-agent-runs-and-coalesce-subsequent-events.md)
+> **Update (2026-09):** [ADR 0106](0106-serialize-agent-runs-and-coalesce-subsequent-events.md)
 > replaces automatic cancellation with serialized runs and platform-native
 > pending-run coalescing. Source-native locks and agent idempotency remain
 > defense in depth for duplicate dispatch and side effects.
@@ -491,7 +491,7 @@ required by the authorization gate. Implementations SHOULD track
   concurrency applies; mitigated by per-stage `cancel-in-progress` groups when
   `event_payload` projection is correct.
 
-  > **Update (2026-09):** [ADR 0098](0098-serialize-agent-runs-and-coalesce-subsequent-events.md)
+  > **Update (2026-09):** [ADR 0106](0106-serialize-agent-runs-and-coalesce-subsequent-events.md)
   > replaces cancellation of the active run with serialized, platform-native
   > pending-run coalescing for the same harness and subject.
 - **Work item abstraction** — harnesses and pre-scripts may need
