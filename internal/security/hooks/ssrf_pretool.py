@@ -275,6 +275,17 @@ def _parse_egress_allowlist() -> set[tuple[str, int]]:
                 wc_port = 0
             wc_host = wc_host.lower().rstrip(".")
             if wc_host.startswith("*.") and len(wc_host) > 2 and "*" not in wc_host[2:]:
+                # Label-depth check catches single-label TLD wildcards like
+                # *.com or *.net. It does NOT catch multi-label public
+                # suffixes such as *.co.uk, *.com.au, or *.github.io — those
+                # pass this check (>= 2 dots) and are accepted below despite
+                # spanning many independently-controlled domains. We accept
+                # this as a known residual risk rather than shipping a
+                # bundled public-suffix list: FULLSEND_EGRESS_ALLOWLIST is
+                # operator-controlled infrastructure config, not attacker
+                # input, and the L7 proxy remains the primary SSRF
+                # enforcement boundary even when this heuristic under-blocks.
+                # See docs/contributing/runtime-implementation.md.
                 if wc_host.count(".") < 2:
                     print(
                         f"WARNING: wildcard entry '{entry}' in FULLSEND_EGRESS_ALLOWLIST "

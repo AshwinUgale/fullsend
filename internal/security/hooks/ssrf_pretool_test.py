@@ -1119,6 +1119,23 @@ class TestEgressAllowlistParsing:
             # *.atlassian.net has depth >= 2, so no warning for it
             assert "*.atlassian.net" not in captured.err
 
+    def test_multi_label_public_suffix_wildcard_accepted_known_limitation(self, hook, capsys):
+        """`*.co.uk` has depth >= 2 so it passes the overly-broad check and is
+        accepted, even though it spans many independently-controlled domains.
+        This is a documented, accepted residual risk (see
+        docs/contributing/runtime-implementation.md) rather than a bug: the
+        label-depth heuristic only filters single-label TLD wildcards like
+        `*.com`, not multi-label public suffixes.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {"FULLSEND_EGRESS_ALLOWLIST": "*.co.uk:443"},
+        ):
+            result = hook._parse_egress_allowlist()
+            assert ("*.co.uk", 443) in result
+            captured = capsys.readouterr()
+            assert "overly broad" not in captured.err
+
     def test_malformed_port_warns(self, hook, capsys):
         with mock.patch.dict(
             os.environ,
@@ -1177,6 +1194,35 @@ class TestWildcardAllowlistMatching:
             {"FULLSEND_EGRESS_ALLOWLIST": "*.atlassian.net:443"},
         ):
             assert hook._is_host_allowlisted("atlassian.net.evil.com", 443) is False
+
+    def test_wildcard_does_not_match_label_prefix_lookalike(self, hook):
+        """Wildcard `*.atlassian.net` must not match `xatlassian.net` or
+        `notatlassian.net` — these share a suffix as raw characters
+        (`tlassian.net`) but not as a dot-delimited label boundary. A
+        regression that dropped the leading dot from the match suffix (e.g.
+        matching on `entry_host[2:]` instead of `entry_host[1:]`) would
+        incorrectly allow these.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {"FULLSEND_EGRESS_ALLOWLIST": "*.atlassian.net:443"},
+        ):
+            assert hook._is_host_allowlisted("xatlassian.net", 443) is False
+            assert hook._is_host_allowlisted("notatlassian.net", 443) is False
+
+    def test_wildcard_does_not_match_suffix_spoof_with_label_boundary(self, hook):
+        """Wildcard `*.atlassian.net` must not match `foo.atlassian.net.evil.com`
+        or `notatlassian.net.attacker.com` — both contain `.atlassian.net`
+        (or a lookalike) as a substring but not as a trailing suffix. A
+        regression that used substring containment instead of `str.endswith`
+        would incorrectly allow these.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {"FULLSEND_EGRESS_ALLOWLIST": "*.atlassian.net:443"},
+        ):
+            assert hook._is_host_allowlisted("foo.atlassian.net.evil.com", 443) is False
+            assert hook._is_host_allowlisted("notatlassian.net.attacker.com", 443) is False
 
     def test_wildcard_port_must_match(self, hook):
         with mock.patch.dict(
