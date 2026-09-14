@@ -213,8 +213,11 @@ func TestToNormalizedEvent_IssueLabel_ProjectAccessTokenBot(t *testing.T) {
 	if ne.Actor.ID != "project_42_bot_xyz" {
 		t.Errorf("Actor.ID = %q, want %q", ne.Actor.ID, "project_42_bot_xyz")
 	}
-	if ne.Transition.Label == nil || ne.Transition.Label.Name != "ready-for-review" {
-		t.Errorf("expected Transition.Label.Name = ready-for-review, got %+v", ne.Transition.Label)
+	if ne.Transition.Label == nil {
+		t.Fatal("expected Transition.Label to be set")
+	}
+	if ne.Transition.Label.Name != "ready-for-review" {
+		t.Errorf("Label.Name = %q, want %q", ne.Transition.Label.Name, "ready-for-review")
 	}
 }
 
