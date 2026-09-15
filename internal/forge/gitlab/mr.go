@@ -295,10 +295,18 @@ func (c *LiveClient) UpdatePullRequestBranch(ctx context.Context, owner, repo st
 //   - APPROVE: POST /projects/:id/merge_requests/:iid/approve
 //     When commitSHA is non-empty, it is passed as the "sha" parameter
 //     so GitLab rejects the approval if HEAD has advanced (409 Conflict).
-//     When GitLab rejects the approval because the authenticated user is
-//     the MR author (self-approval is blocked by default), the method
-//     falls back to posting a note that records the approve verdict.
-//     The sticky review comment remains the authoritative record.
+//     GitLab rejects the approval outright when the authenticated user is
+//     the MR author (self-approval is blocked by default:
+//     merge_requests_author_approval=false), and fullsend's code and
+//     review agents share one bot PAT on GitLab, so that rejection is a
+//     certainty on bot-authored MRs, not a possible-but-rare outcome.
+//     The identity is checked before the call, and the call is skipped
+//     entirely in favor of posting a note that records the approve
+//     verdict. A post-hoc 401 handler remains as a safety net for edge
+//     cases (e.g., a future per-role PAT where the pre-call identity
+//     check doesn't apply but project settings still block approval).
+//     The sticky review comment remains the authoritative record either
+//     way.
 //   - REQUEST_CHANGES or COMMENT: POST a note with the review body,
 //     plus individual notes for each inline comment.
 //     GitLab's Notes API has no commit-pinning parameter, so commitSHA
@@ -313,6 +321,24 @@ func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo st
 
 	switch event {
 	case "APPROVE":
+		// The bot PAT is always the MR author on bot-authored MRs, and
+		// GitLab's default merge_requests_author_approval=false always
+		// rejects self-approval. When the pre-call check confirms that,
+		// skip the API call that is known to fail and record the verdict
+		// as a note directly. If the check itself errors, or resolves to
+		// a different identity, fall through to the normal approve call;
+		// the 401 handling below still catches genuine self-approval as
+		// a safety net.
+		if isAuthor, err := c.isAuthenticatedUserMRAuthor(ctx, owner, repo, number); err == nil && isAuthor {
+			if err := c.postApprovalFallbackNote(ctx, proj, number, body); err != nil {
+				return err
+			}
+			// Inline comments still need posting; the body was already
+			// folded into the fallback note.
+			body = ""
+			break
+		}
+
 		approvePath := fmt.Sprintf("/projects/%s/merge_requests/%d/approve", proj, number)
 		approveBody := map[string]string{}
 		if commitSHA != "" {
@@ -334,17 +360,16 @@ func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo st
 			}
 			// Idempotent: already approved (undocumented 409 variant).
 		case http.StatusUnauthorized:
-			// GitLab returns 401 when merge_requests_author_approval is
-			// false (the default) and the authenticated user is the MR
-			// author, but it also returns the same generic 401 body for
-			// other approval-ineligibility reasons. Genuine credential
-			// failures are recognized by known phrasing and always treated
-			// as a hard error. Every other 401 is verified against the
-			// authenticated identity (isAuthenticatedUserMRAuthor) before
-			// falling back to a note — a 401 for a reason other than
-			// self-approval must still surface as an error, not a
-			// false-positive "approved" note. The sticky review comment
-			// remains the authoritative record for the self-approval case.
+			// Safety net: the pre-call identity check above either
+			// errored or found the bot isn't the author, so this 401 was
+			// not predicted. GitLab returns the same generic 401 body
+			// for self-approval and for other approval-ineligibility
+			// reasons, so genuine credential failures are recognized by
+			// known phrasing and always treated as a hard error, and
+			// every other 401 is re-verified against the authenticated
+			// identity before falling back to a note — a 401 for a
+			// reason other than self-approval must still surface as an
+			// error, not a false-positive "approved" note.
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			msg := extractConflictMessage(data)
@@ -632,7 +657,10 @@ const approvalFallbackNote = "Formal API approval skipped (MR author matches the
 // isCredentialFailure reports whether a GitLab 401 body from POST
 // /approve indicates a genuine credential problem (invalid, expired, or
 // revoked token) rather than an authorization refusal such as the
-// self-approval block. GitLab returns the same generic "401
+// self-approval block. It is only consulted by the post-hoc 401 safety
+// net in CreatePullRequestReview — the primary path checks identity
+// before making the call and never sees this 401 for the common
+// same-identity case. GitLab returns the same generic "401
 // Unauthorized" body (or an empty body) for both cases, so message text
 // alone cannot distinguish "self-approval" from other approval
 // ineligibility reasons — only known credential-failure phrasing is
@@ -656,28 +684,43 @@ func isCredentialFailure(msg string) bool {
 }
 
 // isAuthenticatedUserMRAuthor reports whether the authenticated bot
-// identity is the author of the given merge request. It is used to
-// confirm a genuine GitLab self-approval 401 (merge_requests_author_approval
-// is false and the authenticated user is the MR author) before
-// CreatePullRequestReview falls back to posting a note in place of a
-// formal approval. An error here means the check could not be performed;
-// callers must fail closed (return the error) rather than assume
-// self-approval.
+// identity is the author of the given merge request. CreatePullRequestReview
+// calls this before attempting POST /approve: on GitLab,
+// merge_requests_author_approval is false by default, so an authenticated
+// user who is also the MR author can never have their approval accepted.
+// When this reports true, the approve call is skipped entirely in favor
+// of posting a note. It is also consulted a second time, as a safety
+// net, if a 401 arrives despite that pre-check (e.g., the check errored,
+// or resolved to a different identity than the one project settings end
+// up rejecting). An error here means the check could not be performed;
+// callers must fail closed (return the error, or fall through to the
+// normal approve call before the fact) rather than assume self-approval.
+// An empty username from either lookup is treated the same way — GitLab
+// always populates it on a 200 response, so an empty string signals a
+// lookup that didn't actually resolve an identity, and comparing two
+// empty strings as equal would otherwise be a false positive match.
 func (c *LiveClient) isAuthenticatedUserMRAuthor(ctx context.Context, owner, repo string, number int) (bool, error) {
 	authUser, err := c.GetAuthenticatedUser(ctx)
 	if err != nil {
 		return false, fmt.Errorf("get authenticated user: %w", err)
 	}
+	if authUser == "" {
+		return false, fmt.Errorf("get authenticated user: empty username")
+	}
 	info, err := c.GetPullRequestInfo(ctx, owner, repo, number)
 	if err != nil {
 		return false, fmt.Errorf("get merge request !%d author: %w", number, err)
 	}
+	if info.AuthorID == "" {
+		return false, fmt.Errorf("get merge request !%d author: empty author username", number)
+	}
 	return info.AuthorID == authUser, nil
 }
 
-// postApprovalFallbackNote records an approve verdict as an MR note when
-// GitLab rejects the formal /approve call because the authenticated user
-// is the MR author.
+// postApprovalFallbackNote records an approve verdict as an MR note in
+// place of a formal /approve call — either because the call was skipped
+// upfront (the authenticated user is known to be the MR author) or,
+// as a safety net, because GitLab rejected the call for that reason.
 func (c *LiveClient) postApprovalFallbackNote(ctx context.Context, proj string, number int, body string) error {
 	fallbackBody := approvalFallbackNote
 	if body != "" {
