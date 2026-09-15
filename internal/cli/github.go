@@ -408,7 +408,7 @@ func runGitHubSetupPerRepo(ctx context.Context, client forge.Client, printer *ui
 	// still reaches vars/secrets. CLI struct fields remain a fallback
 	// for callers that set them without recording changedFlags.
 	effectiveMintURL := effectiveSetupMintURL(cfg, effective)
-	effectiveRegion := effectiveSetupRegion(cfg, effective)
+	effectiveRegion := effectiveInferenceRegion(cfg, effective)
 	repoVars := map[string]string{
 		"FULLSEND_MINT_URL":   effectiveMintURL,
 		"FULLSEND_GCP_REGION": effectiveRegion,
@@ -661,6 +661,9 @@ func fetchAndValidatePreset(cfg githubSetupConfig, printer *ui.Printer) ([]byte,
 	return presetData, nil
 }
 
+// validatePresetLayer parses the --config preset as a per-repo config
+// layer, runs its structural Validate, and checks its mint URL and
+// inference WIF provider formats. data is the raw preset YAML.
 func validatePresetLayer(data []byte) error {
 	if !config.IsPerRepoYAML(data) {
 		return fmt.Errorf("preset is not a per-repo configuration")
@@ -672,13 +675,16 @@ func validatePresetLayer(data []byte) error {
 	if err := w.Validate(); err != nil {
 		return fmt.Errorf("invalid preset: %w", err)
 	}
-	pr, ok := w.(config.PerRepoConfigWriter)
+	pr, ok := w.(config.PerRepoConfigReader)
 	if !ok {
 		return fmt.Errorf("preset is not a per-repo configuration")
 	}
 	return validateSetupValueFormats(pr, "preset")
 }
 
+// validateCLISetupValues checks that explicitly passed CLI setup flags
+// (--runtime, --inference-provider, --inference-wif-provider, and the
+// --openai-* trio) hold valid values, independent of any preset layer.
 func validateCLISetupValues(cfg githubSetupConfig) error {
 	if cfg.runtime != "" && !slices.Contains(config.ValidRuntimes(), cfg.runtime) {
 		return fmt.Errorf("invalid --runtime %q: must be one of %s", cfg.runtime, strings.Join(config.ValidRuntimes(), ", "))
@@ -694,6 +700,10 @@ func validateCLISetupValues(cfg githubSetupConfig) error {
 	return validateOpenAISetupFlags(cfg)
 }
 
+// validateSetupValueFormats checks the mint URL and inference WIF
+// provider values readable from r (a preset or the composed effective
+// config) against their required formats. source names the layer being
+// checked (e.g. "preset") for error messages; nil r is a no-op.
 func validateSetupValueFormats(r config.PerRepoConfigReader, source string) error {
 	if r == nil {
 		return nil
@@ -732,6 +742,11 @@ func composeSetupLayers(overlayYAML []byte, overlay config.PerRepoConfigWriter, 
 	return config.ParsePerRepoConfigWriterLayered(data, baseData)
 }
 
+// resolveInferenceReuse determines, for each of the GCP project and WIF
+// provider inference values, whether setup should reuse the existing
+// repo secret because neither the CLI flag nor the composed effective
+// config supplied a value. It errors if a value is missing and no
+// existing secret is found, since one or the other is required.
 func resolveInferenceReuse(ctx context.Context, client forge.Client, owner, repo string, cfg githubSetupConfig, effective config.PerRepoConfigReader) (reuseProject, reuseWIF bool, err error) {
 	if effectiveInferenceProject(cfg, effective) == "" {
 		var exists bool
@@ -758,6 +773,9 @@ func resolveInferenceReuse(ctx context.Context, client forge.Client, owner, repo
 	return reuseProject, reuseWIF, nil
 }
 
+// effectiveInferenceProject returns the GCP inference project to use:
+// the explicit --inference-project flag if set, otherwise the value
+// from the composed effective config, otherwise empty.
 func effectiveInferenceProject(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
 	if cfg.inferenceProject != "" {
 		return cfg.inferenceProject
@@ -768,6 +786,9 @@ func effectiveInferenceProject(cfg githubSetupConfig, effective config.PerRepoCo
 	return ""
 }
 
+// effectiveInferenceWIF returns the GCP inference WIF provider to use:
+// the explicit --inference-wif-provider flag if set, otherwise the
+// value from the composed effective config, otherwise empty.
 func effectiveInferenceWIF(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
 	if cfg.inferenceWIFProvider != "" {
 		return cfg.inferenceWIFProvider
@@ -778,6 +799,9 @@ func effectiveInferenceWIF(cfg githubSetupConfig, effective config.PerRepoConfig
 	return ""
 }
 
+// effectiveSetupMintURL returns the mint URL to use: the explicit
+// --mint-url flag if set, otherwise the value from the composed
+// effective config, otherwise config.DefaultPerRepoMintURL.
 func effectiveSetupMintURL(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
 	if cfg.mintURL != "" {
 		return cfg.mintURL
@@ -790,7 +814,11 @@ func effectiveSetupMintURL(cfg githubSetupConfig, effective config.PerRepoConfig
 	return config.DefaultPerRepoMintURL
 }
 
-func effectiveSetupRegion(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
+// effectiveInferenceRegion returns the inference region to use: the
+// explicit --inference-region flag if set, otherwise the value from
+// the composed effective config, otherwise
+// config.DefaultPerRepoInferenceRegion.
+func effectiveInferenceRegion(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
 	if cfg.inferenceRegion != "" {
 		return cfg.inferenceRegion
 	}
@@ -802,6 +830,9 @@ func effectiveSetupRegion(cfg githubSetupConfig, effective config.PerRepoConfigR
 	return config.DefaultPerRepoInferenceRegion
 }
 
+// effectiveSetupRuntime returns the runtime to use: the explicit
+// --runtime flag if set, otherwise the value from the composed
+// effective config, otherwise empty.
 func effectiveSetupRuntime(cfg githubSetupConfig, effective config.PerRepoConfigReader) string {
 	if cfg.runtime != "" {
 		return cfg.runtime
