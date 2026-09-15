@@ -116,7 +116,11 @@ Agents amplify authority. If a compromised account can trigger agent actions, th
 
 ### Defense considerations
 
-- **Agent actions are attributable** — every agent action traces back to the triggering event and the human who initiated it
+- **Agent actions are attributable** — every agent action traces back to the
+  triggering event and human, or, for state-only scheduled discovery, to the
+  verified platform invocation and human-reviewed policy and harness revisions
+  that authorized it (see
+  [ADR 0098](../ADRs/0098-entity-first-harness-evaluation.md))
 - **No self-approval** — an agent that implements a change cannot also approve it
 - **Rate limiting / anomaly detection** — unusual patterns of agent activity (sudden burst of cross-repo changes, changes to security-sensitive paths) trigger alerts
 - **CODEOWNERS for agent config** — changes to agent rules, permissions, and configuration always require human approval

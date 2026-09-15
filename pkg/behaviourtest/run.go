@@ -10,10 +10,10 @@ import (
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 
+	"github.com/fullsend-ai/fullsend/internal/e2etest"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/drivers/env"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/suite"
 	"github.com/fullsend-ai/fullsend/pkg/behaviourtest/world"
-	"github.com/fullsend-ai/fullsend/pkg/e2etest"
 )
 
 const fullsendModulePath = "github.com/fullsend-ai/fullsend"
