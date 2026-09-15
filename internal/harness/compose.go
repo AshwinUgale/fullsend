@@ -407,6 +407,7 @@ func loadBaseChain(
 			return nil, nil, fmt.Errorf("resolving containment root: %w", err)
 		}
 		absWorkspace = filepath.Clean(absWorkspace)
+		unresolvedWorkspace := absWorkspace
 		absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolving containment root symlinks: %w", err)
@@ -424,9 +425,10 @@ func loadBaseChain(
 			// canonicalized so workspace aliases compare consistently.
 			resolvedBaseDir, dirErr := filepath.EvalSymlinks(filepath.Dir(absBasePath))
 			if dirErr != nil {
-				// Keep rejecting lexical escapes before returning a missing-path
-				// error, preserving the containment error for traversal attempts.
-				if lexicallyEscapes {
+				// Keep rejecting unresolved paths outside the workspace before
+				// returning a missing-path error for paths that remain inside it.
+				unresolvedRel, unresolvedRelErr := filepath.Rel(unresolvedWorkspace, absBasePath)
+				if unresolvedRelErr != nil || strings.HasPrefix(unresolvedRel, "..") {
 					return nil, nil, fmt.Errorf("base path %q escapes workspace root", baseRef)
 				}
 				return nil, nil, fmt.Errorf("resolving base path symlinks: %w", dirErr)

@@ -538,6 +538,21 @@ base: ../outside.yaml
 	assert.Contains(t, err.Error(), "escapes workspace root")
 }
 
+func TestLoadWithBase_LocalBase_MissingSiblingWithinWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	harnessDir := filepath.Join(workspace, "harness")
+	path := writeTestHarness(t, harnessDir, "child.yaml", `
+agent: agents/child.md
+role: test
+base: ../sibling-dir/missing.yaml
+`)
+
+	_, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: workspace})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "resolving base path symlinks")
+	assert.NotContains(t, err.Error(), "escapes workspace root")
+}
+
 func TestLoadWithBase_LocalBase_WorkspaceRootSymlinkAlias(t *testing.T) {
 	realDir := t.TempDir()
 	aliasParent := t.TempDir()
