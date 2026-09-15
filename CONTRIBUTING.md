@@ -167,10 +167,14 @@ When the right tracker is unclear, file in this repository and link the [experim
 
 The [`filing-issues`](skills/filing-issues/SKILL.md) skill encodes this split for automated filing.
 
-## Maintainers
+## Contributor ladder
 
-See [MAINTAINERS.md](MAINTAINERS.md) for the maintainer role, eligibility
-criteria, and the nomination process.
+This project defines four contributor roles — Vouched, Triage, Write,
+and Maintainer — each granting additional capabilities. See
+[LADDER.md](LADDER.md) for the full ladder and how to request each role.
+
+For the Maintainer role specifically, see
+[MAINTAINERS.md](MAINTAINERS.md).
 
 ## License
 
