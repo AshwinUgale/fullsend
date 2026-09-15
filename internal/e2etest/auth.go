@@ -114,6 +114,13 @@ func MintEnrollProjectID(cfg EnvConfig) string {
 	return strings.TrimSpace(cfg.GCPProjectID)
 }
 
+// e2eMintLevel is the mint privilege level requested for e2e installation
+// tokens. Duplicated from internal/mintcore.LevelWrite so this package does
+// not import internal/mintcore (which is nested outside this module's
+// replace-free dependency graph). Kept in sync by
+// TestE2EMintLevelMatchesMintcore.
+const e2eMintLevel = "write"
+
 // resolveE2EToken mints a cross-org e2e installation token for targetOrg.
 // Repos is set to ["*"] to explicitly request an org-wide token (needed to
 // create and operate on e2e-lock and .fullsend at runtime).
@@ -124,7 +131,7 @@ func resolveE2EToken(ctx context.Context, mintURL, targetOrg string) (string, er
 	result, err := mintclient.MintToken(ctx, mintclient.MintRequest{
 		MintURL:   mintURL,
 		Role:      "e2e",
-		Level:     "write",
+		Level:     e2eMintLevel,
 		Repos:     []string{"*"},
 		TargetOrg: targetOrg,
 	})

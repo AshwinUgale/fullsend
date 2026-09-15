@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fullsend-ai/fullsend/internal/cli"
+	"github.com/fullsend-ai/fullsend/internal/mintcore"
 )
 
 func TestMintEnrollProjectID(t *testing.T) {
@@ -120,6 +121,11 @@ func TestDefaultMintURLMatchesCLI(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, cli.DefaultMintURL, defaultMintURL)
 	assert.Equal(t, cli.IsHostedMintURL(defaultMintURL), isHostedMintURL(defaultMintURL))
+}
+
+func TestE2EMintLevelMatchesMintcore(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, mintcore.LevelWrite, e2eMintLevel)
 }
 
 func TestResolveLocalToken_FromGHToken(t *testing.T) {
