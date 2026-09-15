@@ -323,11 +323,14 @@ The existing design principle is that [the repo is the coordinator](problems/age
   ([Authorization Contract v1](normative/authorization/v1/);
   [ADR 0054](ADRs/0054-require-authorization-on-all-agent-dispatch-paths.md)).
 - Poll entity-discovery authorization: `fullsend poll` has no prompting event
-  actor; trusted Fullsend-controlled invocation provenance authorizes entity
-  evaluation, and callers without that provenance are denied. Fullsend
-  minimizes unneeded dangerous entity data before CEL where fidelity permits;
-  trusted input-selection layers authorize retained actor-originated
-  instructions before use. Every run uses the harness's configured identity
+  actor; verified, non-user-assertable Fullsend invocation provenance authorizes
+  entity enumeration and evaluation, and callers without it are denied. Before
+  CEL, the platform independently enumerates action-indicating entity elements,
+  resolves each actor's current permission, and removes elements below the
+  applicable stage threshold. Later input-selection and injection filtering are
+  defense in depth for prompt construction. Entity-first execution remains
+  disabled until its versioned normalized-entity contract exists. Every run
+  uses the harness's configured identity
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 
 **Open questions:**
@@ -394,6 +397,12 @@ Observability is a cross-cutting concern that touches every other component. Eac
 
 - JSONL reasoning trace exposure: raw JSONL conversation transcripts are extracted from sandboxes and stored with owner-scoped access. Credential scanning acts as an invariant check on [ADR 0017](ADRs/0017-credential-isolation-for-sandboxed-agents.md)'s isolation model. Agents handling data from protected sources beyond the target repo can opt in to JSONL suppression via configuration ([ADR 0021](ADRs/0021-jsonl-reasoning-trace-exposure.md)).
 - Event-driven stage dispatch remains traceable end-to-end in the GitHub Actions UI by using synchronous `workflow_call` dispatch (see [ADR 0041](ADRs/0041-synchronous-workflow-call-event-dispatch.md)).
+- Scheduled entity-discovery runs are attributable to the verified Fullsend
+  invocation identity, target repository, effective policy, harness revision,
+  and resolved entity; retained action-indicating elements preserve their actor
+  provenance. State-only predicates trace to the configured service identity
+  and versioned policy/harness configuration
+  ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 - Distributed tracing: framework-native OpenTelemetry instrumentation with zero-configuration baseline. Every run produces `run-telemetry.jsonl` locally; optional live OTLP export to any compatible backend. W3C trace context propagation links multi-agent pipelines into unified traces. OTEL GenAI semantic conventions enable LLM-aware backends ([ADR 0050](ADRs/0050-distributed-tracing-instrumentation.md)).
 - Eval measurements: the concept of scoring traces ([fail-open](glossary.md#fail-open)). [OTEL primary facts](glossary.md#otel-primary-facts) stay on the run trace (`run-telemetry.jsonl`); [OTEL derived products](glossary.md#otel-derived-products) are the scores (`eval-measurements.jsonl`) ([ADR 0087](ADRs/0087-eval-measurements-online-trace-scoring.md)). See [Eval Measurements](guides/infrastructure/eval-measurements.md). When `OTEL_EXPORTER_OTLP_*` is set, scores also export as `gen_ai.evaluation.result` span events on the same TraceID (same OTLP path as agent traces; fail-open).
 
@@ -403,7 +412,12 @@ Observability is a cross-cutting concern that touches every other component. Eac
 - ~~How do we balance detailed tracing (useful for debugging) with the volume of data agents will produce?~~ Decided in [ADR 0050](ADRs/0050-distributed-tracing-instrumentation.md): instrument all lifecycle steps comprehensively; volume is managed by backends not by suppressing data at the source.
 - ~~How do we score wild agent traces for trends without a second export stack?~~ Decided in [ADR 0087](ADRs/0087-eval-measurements-online-trace-scoring.md): eval measurements write local JSONL beside telemetry when at least one new score row is produced (including `label: skip`); portable remote export uses the same OTLP config as traces (`gen_ai.evaluation.result` events). The JSONL is absent (not empty) when telemetry/manifest is missing, no traces match, or every candidate is already in the ledger.
 - What is the retention and access model for agent logs? Who can see what? (JSONL trace access model decided in [ADR 0021](ADRs/0021-jsonl-reasoning-trace-exposure.md); retention policy and broader log access remain open.)
-- How does observability interact with the security requirement that "every action is logged, attributable, and reviewable"? (See [security-threat-model.md](problems/security-threat-model.md).)
+- How does observability interact with the security requirement that "every
+  action is logged, attributable, and reviewable"? Scheduled entity-discovery
+  attribution is decided in
+  [ADR 0098](ADRs/0098-entity-first-harness-evaluation.md); broader audit-log
+  requirements remain open. (See
+  [security-threat-model.md](problems/security-threat-model.md).)
 - Is there a real-time monitoring requirement (agent is stuck, agent is behaving anomalously), or is observability primarily forensic?
 
 ## Agent Registry

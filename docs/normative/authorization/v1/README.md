@@ -98,6 +98,10 @@ The bash dispatch implementation uses a parameterized
 The authorization gate is **fail-closed**: when a role cannot be
 determined, the actor is denied.
 
+The entity-discovery rows below specify the future ADR 0098 path and do not
+describe behavior currently implemented by `fullsend dispatch` or
+`fullsend poll`.
+
 | Condition | Outcome |
 |-----------|---------|
 | Collaborator API returns an unrecognized `role_name` | Mapped to `none`; denied |
@@ -108,8 +112,10 @@ determined, the actor is denied.
 | Fullsend poll invocation provenance is missing or unverifiable | Entity discovery denied |
 | Harness entity sources are missing or malformed | That harness is skipped for scheduled evaluation |
 | Effective platform eligibility policy is missing, malformed, or unverifiable | Scheduled evaluations governed by that policy are denied |
+| Effective platform eligibility policy uses a wildcard without explicit platform-level justification | Scheduled evaluations governed by that policy are denied |
 | Current permission for an action-indicating element's actor is missing or unverifiable | That element cannot trigger execution |
 | Current permission for an action-indicating element's actor is below the applicable stage threshold | That element cannot trigger execution |
+| Versioned normalized-entity contract is missing or incomplete | Entity-first execution denied |
 
 ## Exceptions
 
@@ -160,21 +166,34 @@ platform does not default schedule or manual actors to `role: none`.
 
 ### Fullsend-originated entity discovery
 
+This is the future path adopted by
+[ADR 0098](../../../ADRs/0098-entity-first-harness-evaluation.md); it is not yet
+implemented by `fullsend dispatch` or `fullsend poll`, and entity-first
+execution MUST NOT be enabled until the versioned normalized-entity contract
+defines CEL-eligible and prompt-eligible fields. That contract is a platform
+allowlist; a harness may request fewer fields but cannot expand it.
+
 `fullsend poll` may perform scheduled entity discovery without synthesizing a
 `NormalizedEvent` or event actor. This path is authorized only when its caller
-has trusted Fullsend-controlled invocation provenance. A caller that cannot
-establish that provenance MUST be denied; external callers cannot assert it.
+has trusted Fullsend-controlled invocation provenance: a verified,
+non-user-assertable platform execution identity bound to the invocation and its
+target, such as an attested workflow/job identity or installation credential.
+A CLI flag, request header, or other caller-supplied claim is insufficient. A
+caller that cannot establish that provenance MUST be denied. Wildcard
+eligibility (`*` or `all`) requires the same explicit platform-level
+justification as any other wildcard allowlist in this contract.
 
 Authorization of the poll origin does not authorize entity content. Before CEL
-evaluation, Fullsend MUST resolve and expose the current forge permission level
-for the actor of every action-indicating element retained in the entity, such as
-a comment containing a slash command. Historical or cached actor relationships
-are insufficient. Fullsend MUST prevent such an element from triggering
-execution unless that current permission meets the applicable observation or
-mutation threshold. The platform MAY enforce this by removing unauthorized
-action-triggering content before CEL, or by validating the element selected by
-CEL before execution. A harness CEL predicate MAY further restrict selection
-using the current actor-permission fields, but cannot weaken the platform gate.
+evaluation, Fullsend MUST independently enumerate every action-indicating
+element: actor-originated entity history whose content or state is treated as a
+request for a stage to run, including issue or change-proposal bodies, comments,
+reviews, and label applications when used for that purpose. Fullsend MUST
+resolve the current forge permission level for each element's actor and remove
+the element unless that permission meets the applicable observation or mutation
+threshold. Historical or cached actor relationships are insufficient. A
+harness CEL predicate MAY further restrict selection using retained elements and
+their current actor-permission fields, but cannot weaken the platform gate or
+be relied upon to identify an element for later authorization.
 
 Fullsend MUST omit or minimize other unneeded untrusted fields where the
 normalized entity contract permits, while retaining the state, content, and
@@ -198,14 +217,18 @@ used for dispatch gating:
 evidence of current authority. Event-backed authorization must be derived from
 the forge's permission model at event time, not from cached or inferred
 relationships. Fullsend-originated entity discovery must instead be authorized
-from trusted Fullsend-controlled invocation provenance; historical actors and
-relationship fields must not serve as its dispatch gate.
+from trusted Fullsend-controlled invocation provenance for enumeration and
+evaluation. Action-indicating elements are separately gated by current actor
+permission; historical actors and relationship fields must not serve as
+authorization evidence.
 
 ## Enforcement point
 
 Authorization is enforced as a **platform-level gate** before CEL trigger
 evaluation. Event-backed dispatch uses the normalized event actor;
-Fullsend-originated entity discovery uses trusted invocation provenance.
+Fullsend-originated entity discovery uses trusted invocation provenance to
+authorize enumeration and evaluation, then independently filters
+action-indicating elements by current actor permission before CEL.
 
 ```
 Forge event
@@ -217,9 +240,9 @@ Forge event
 Fullsend poll invocation
   --> Trusted-origin authorization gate     <-- enforced here
   --> Entity enumeration and resolution
-  --> Current actor permissions and content minimization
+  --> Enumerate action-indicating elements
+  --> Current-actor gate and minimization    <-- enforced here
   --> CEL trigger evaluation (event is null)
-  --> Selected-element authorization gate   <-- enforced here
   --> Further trust/injection filtering
   --> Execution
 ```
@@ -236,8 +259,9 @@ an event that fails authorization never reaches CEL evaluation.
 This separation is enforced architecturally: on the event-backed path,
 `IsAuthorized()` runs before `MatchHarnesses()` in the dispatch core. On the
 entity-discovery path, the trusted-origin gate runs before enumeration and CEL
-evaluation, and `event` remains null. Neither path lets a CEL expression
-override or relax an authorization denial.
+evaluation; the platform removes unauthorized action-indicating elements before
+CEL, and `event` remains null. Neither path lets a CEL expression override or
+relax an authorization denial.
 
 ### Per-repo configurability
 

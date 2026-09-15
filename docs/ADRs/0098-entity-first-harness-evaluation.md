@@ -78,8 +78,10 @@ state become platform responsibilities.
   without entity sources remain event-triggered only, always receive an event,
   and need no compatibility change to existing event-based predicates. Trigger
   CEL represents a missing event as CEL null. Overlay `when` expressions also
-  receive the required `entity` and nullable `event`, so source-specific
-  selection can inspect entity state when no prompting event exists.
+  receive the required `entity` and nullable `event`. The normalized entity
+  MUST expose its source system as `entity.source.system`; overlays used for
+  entity discovery select source-specific configuration from that field rather
+  than `event.source.system`.
 - **Candidate sources:** Event-driven dispatch resolves the event's entity and
   supplies both values; scheduled discovery supplies the entity with `event`
   set to null. Events are a low-latency source of candidates, not the
@@ -92,13 +94,17 @@ state become platform responsibilities.
   scheduled enumeration and resolution.
 - **Handled-state evidence:** The normalized entity contract MUST provide
   stable cross-system identity, current state, the bounded or queryable
-  activity required by the harness, and actor context. Every action-indicating
-  element, such as a comment containing a slash command, MUST expose actor
-  provenance and the actor's current forge permission level resolved at entity
-  evaluation time. A harness MAY infer that qualifying activity has already
-  been handled from entity state, such as an existing triage comment, or use an
-  explicit per-harness receipt or poll checkpoint. The field-level contract and
-  query-planning protocol belong in a versioned normative specification.
+  activity required by the harness, and actor context. An action-indicating
+  element is actor-originated entity history whose content or state is treated
+  as a request for a stage to run, including issue or change-proposal bodies,
+  comments, reviews, and label applications when used for that purpose. Every
+  such element MUST expose actor provenance and the actor's current forge
+  permission level resolved at entity evaluation time. A harness MAY infer that
+  qualifying activity has already been handled from entity state, such as an
+  existing triage comment, or use an explicit per-harness receipt or poll
+  checkpoint. The field-level contract and query-planning protocol belong in a
+  versioned normative specification and MUST exist before entity-first
+  execution is enabled.
 - **Scheduling:** Recurring evaluation MAY be initiated by a platform/default
   clock or constrained by scheduling metadata in the harness. The clock is
   scheduling machinery, not an authorization principal. Scheduled entity
@@ -113,15 +119,20 @@ state become platform responsibilities.
   continues to authorize event-backed dispatch from its event actor. A
   `fullsend poll` entity-discovery run is instead authorized by its trusted
   Fullsend-controlled origin; callers that cannot establish that provenance are
-  denied. Entity history remains untrusted input. The platform MUST prevent an
-  action-indicating element from triggering execution unless its actor's current
-  permission meets the applicable stage threshold. It MAY remove unauthorized
-  action-triggering content before CEL, or validate the element selected by CEL
-  before execution; CEL can additionally restrict action to elements whose
-  current actor permissions are present in the entity. Further trust and
-  injection filtering MAY run after CEL routing and before the harness
-  pre-script. Neither entity content nor a historical actor can alter the run's
-  configured identity or permissions.
+  denied. Entity history remains untrusted input. Before CEL, the platform MUST
+  independently enumerate action-indicating elements and remove those whose
+  actor's current permission does not meet the applicable stage threshold. CEL
+  can additionally restrict action using the retained elements and their current
+  actor permissions, but does not select an element for a later authorization
+  gate. Further trust and injection filtering MAY run after CEL routing and
+  before the harness pre-script. Neither entity content nor a historical actor
+  can alter the run's configured identity or permissions.
+- **Attribution:** A scheduled run without a prompting human is attributable to
+  the verified Fullsend invocation identity, target repository, effective
+  platform policy, harness revision, and resolved entity. The audit record also
+  identifies every retained action-indicating element and its actor. For
+  state-only predicates such as staleness, the configured service identity and
+  versioned policy/harness configuration are the initiating authority.
 
 ## Consequences
 
@@ -138,6 +149,9 @@ state become platform responsibilities.
   necessarily require new infrastructure.
 - Event actors and historical activity remain usable in CEL without weakening
   the centralized authorization boundary.
+- Existing source-specific overlay expressions that inspect
+  `event.source.system` must use `entity.source.system` for entity-discovery
+  runs.
 - Existing event-only harnesses remain compatible; harnesses opt into nullable
   event context by declaring entity sources. ADR 0063's event-reconstruction
   path still requires a migration plan for polling drivers.
