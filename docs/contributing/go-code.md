@@ -248,7 +248,7 @@ cancellation patterns.
 
 ## httptest handler-invocation assertions
 
-When writing tests that use `httptest.NewServer` with a custom `http.ServeMux`, always assert that the registered handler was actually invoked. Without this assertion, a test can silently pass when the handler path does not match the code's actual request path — `httptest`'s default mux returns 404 for unregistered routes, and if the test expects a "not found" or error outcome, the wrong path produces the right status code by coincidence.
+When writing tests that use `httptest.NewServer` with a custom `http.ServeMux`, always assert that the registered handler was actually invoked. Without this assertion, a test can silently pass when the handler path does not match the code's actual request path — an unmatched route on the `http.ServeMux` returns 404, and if the test expects a "not found" or error outcome, the wrong path produces the right status code by coincidence.
 
 ### Pattern: `handlerCalled` boolean
 
@@ -337,7 +337,7 @@ if errors.Is(err, errGitLabTokenMissing) {
 
 **Do not** match errors by substring: `strings.Contains(err.Error(), "token")` couples error handling to message wording and breaks when messages change. Use `errors.Is` or `errors.As` for all programmatic error checks.
 
-See `internal/cli/forge_client.go` (`errGitLabTokenMissing`), `internal/cli/admin.go` (`errMintNotFound`), and `internal/cli/lock.go` (`errHarnessNotFound`) for examples of this pattern in the codebase.
+See `internal/cli/github_client.go` (`errGitHubTokenMissing`), `internal/cli/forge_client.go` (`errGitLabTokenMissing`), `internal/cli/admin.go` (`errMintNotFound`), and `internal/cli/lock.go` (`errHarnessNotFound`) for examples of this pattern in the codebase.
 
 ### Use `%q` for values in error messages
 
