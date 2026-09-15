@@ -73,8 +73,11 @@ next agent run reconciles all current concerns on the subject.
 Adopt preserve-and-coalesce scheduling for automatic agent triggers. Every event
 still follows the normal input-driver normalization, authorization, harness
 selection, and CEL trigger path. A matching run enters a platform serialization
-scope keyed by harness and stable normalized-event subject. An event that fails
-authorization or does not match the harness trigger creates no pending run.
+scope keyed by harness identity, normalized `repo`, `entity.kind`, and
+`entity.id`. Event-backed and scheduled-discovery runs for the same resolved
+entity use that scope; the key never depends on an event-only field. An event
+that fails authorization or does not match the harness trigger creates no
+pending run.
 
 The execution platform MUST allow the active run to finish and coalesce later
 matching events into one pending run representing the newest retained event.
@@ -89,8 +92,10 @@ platform's single-pending behavior replaces an older pending run with the newest
 ([GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)).
 Fullsend's reusable GitHub workflows currently use subject-scoped agent-stage
 concurrency groups with `cancel-in-progress: true`; implementing this decision
-requires changing that setting to `false` and keeping every participating
-workflow layer on the same key.
+requires changing that setting to `false`. Layers that serialize the same work
+MUST derive compatible harness-and-entity identities, but a synchronous
+`workflow_call` caller and callee MUST retain distinct group-name prefixes so
+the child does not wait on the parent that is waiting for it.
 
 On GitLab CI/CD, a subject-scoped `resource_group` serializes agent jobs.
 `workflow:auto_cancel:on_new_commit: none` and a non-interruptible agent job
@@ -106,12 +111,14 @@ integration must cancel superseded waiters through the API or avoid creating
 them in the dispatch path to satisfy this decision.
 
 Each agent run MUST reconcile the subject's current state rather than assume the
-triggering event describes all outstanding work. The retained event may still
-select harness overlays and provide immediate context, but `fullsend run` does
-not poll for later events or invoke another run itself. A pending follow-up is a
-separate platform execution and does not extend the active run's timeout window.
-Explicit user or operator cancellation remains available and is outside this
-policy.
+triggering event describes all outstanding work. Reading current state does not
+make all of its content actionable: a run MUST NOT treat content from an actor
+who is unauthorized for the corresponding action as instructions. The retained
+event may still select harness overlays and provide immediate context, but
+`fullsend run` does not poll for later events or invoke another run itself. A
+pending follow-up is a separate platform execution and does not extend the
+active run's timeout window. Explicit user or operator cancellation remains
+available and is outside this policy.
 
 Dispatch authorization covers the event that creates a run, not every comment
 or other piece of subject state the agent may read while reconciling. This
