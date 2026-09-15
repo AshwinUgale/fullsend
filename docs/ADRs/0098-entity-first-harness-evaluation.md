@@ -72,12 +72,14 @@ state become platform responsibilities.
   required forge-neutral `entity` and a nullable `event`. The predicate may
   inspect either or both. Harnesses that declare entity sources and can
   therefore be evaluated without a prompting event MUST test `event != null`
-  before accessing event fields. Harnesses without entity sources remain
-  event-triggered only, always receive an event, and need no compatibility
-  change to existing event-based predicates. Trigger CEL represents a missing
-  event as CEL null; overlay `when` evaluation remains unchanged and uses an
-  empty map guarded with `has(event.source)` unless a later specification
-  intentionally unifies the two environments.
+  before accessing event fields. This test provides crash safety only; a
+  harness intended to match during scheduled discovery MUST also express an
+  entity-state condition that can succeed when `event` is null. Harnesses
+  without entity sources remain event-triggered only, always receive an event,
+  and need no compatibility change to existing event-based predicates. Trigger
+  CEL represents a missing event as CEL null; overlay `when` evaluation remains
+  unchanged and uses an empty map guarded with `has(event.source)` unless a
+  later specification intentionally unifies the two environments.
 - **Candidate sources:** Event-driven dispatch resolves the event's entity and
   supplies both values; scheduled discovery supplies the entity with `event`
   set to null. Events are a low-latency source of candidates, not the
@@ -116,9 +118,10 @@ state become platform responsibilities.
 
 ## Consequences
 
-- Harness authors maintain one predicate across event and polling contexts;
-  only harnesses opting into entity sources must guard event access with
-  `event != null`.
+- Harness authors maintain one predicate across event and polling contexts.
+  Harnesses opting into entity sources must guard event access with
+  `event != null`, and those intended to match during scheduled discovery must
+  include an entity-state condition that can succeed when `event` is null.
 - Poll drivers can discover current actionable state without reconstructing a
   complete synthetic event stream.
 - Harnesses may reuse entity state as handled-state evidence instead of writing
