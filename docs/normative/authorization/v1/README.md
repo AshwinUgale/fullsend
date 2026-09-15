@@ -113,6 +113,7 @@ describe behavior currently implemented by `fullsend dispatch` or
 | Harness entity sources are missing or malformed | That harness is skipped for scheduled evaluation |
 | Effective platform eligibility policy is missing, malformed, or unverifiable | Scheduled evaluations governed by that policy are denied |
 | Effective platform eligibility policy uses a wildcard without explicit platform-level justification | Scheduled evaluations governed by that policy are denied |
+| Action-indicating enumeration fails, is unavailable, or does not cover the entity kind | Evaluation of that entity is denied |
 | Current permission for an action-indicating element's actor is missing or unverifiable | That element cannot trigger execution |
 | Current permission for an action-indicating element's actor is below the applicable stage threshold | That element cannot trigger execution |
 | Versioned normalized-entity contract is missing or incomplete | Entity-first execution denied |
@@ -183,17 +184,24 @@ caller that cannot establish that provenance MUST be denied. Wildcard
 eligibility (`*` or `all`) requires the same explicit platform-level
 justification as any other wildcard allowlist in this contract.
 
-Authorization of the poll origin does not authorize entity content. Before CEL
-evaluation, Fullsend MUST independently enumerate every action-indicating
-element: actor-originated entity history whose content or state is treated as a
-request for a stage to run, including issue or change-proposal bodies, comments,
-reviews, and label applications when used for that purpose. Fullsend MUST
-resolve the current forge permission level for each element's actor and remove
-the element unless that permission meets the applicable observation or mutation
-threshold. Historical or cached actor relationships are insufficient. A
-harness CEL predicate MAY further restrict selection using retained elements and
-their current actor-permission fields, but cannot weaken the platform gate or
-be relied upon to identify an element for later authorization.
+Authorization of the poll origin does not authorize entity content. For each
+candidate harness, before evaluating its CEL predicate, Fullsend MUST enumerate
+a platform-defined closed superset of action-indicating elements for the entity
+kind. These are actor-originated entity-history elements whose content or state
+could be treated as a request for a stage to run; the superset includes issue or
+change-proposal bodies, comments, reviews, and label applications wherever the
+entity kind supports them. A harness cannot exclude a supported category from
+classification. If enumeration fails, is unavailable, or does not cover the
+entity kind, evaluation of that entity MUST be denied; only successful
+enumeration may return an empty set for a state-only predicate.
+
+Fullsend MUST resolve the current forge permission level for every enumerated
+element's actor and remove the element unless that permission meets the
+candidate harness's observation or mutation threshold. Historical or cached
+actor relationships are insufficient. A harness CEL predicate MAY further
+restrict selection using retained elements and their current actor-permission
+fields, but cannot weaken the platform gate or be relied upon to identify an
+element for later authorization.
 
 Fullsend MUST omit or minimize other unneeded untrusted fields where the
 normalized entity contract permits, while retaining the state, content, and
@@ -240,11 +248,12 @@ Forge event
 Fullsend poll invocation
   --> Trusted-origin authorization gate     <-- enforced here
   --> Entity enumeration and resolution
-  --> Enumerate action-indicating elements
-  --> Current-actor gate and minimization    <-- enforced here
-  --> CEL trigger evaluation (event is null)
-  --> Further trust/injection filtering
-  --> Execution
+  --> For each candidate harness:
+      --> Enumerate action-indicating elements
+      --> Harness-stage actor gate           <-- enforced here
+      --> CEL trigger evaluation (event is null)
+      --> Further trust/injection filtering
+      --> Execution
 ```
 
 ### CEL triggers: routing only
@@ -259,9 +268,10 @@ an event that fails authorization never reaches CEL evaluation.
 This separation is enforced architecturally: on the event-backed path,
 `IsAuthorized()` runs before `MatchHarnesses()` in the dispatch core. On the
 entity-discovery path, the trusted-origin gate runs before enumeration and CEL
-evaluation; the platform removes unauthorized action-indicating elements before
-CEL, and `event` remains null. Neither path lets a CEL expression override or
-relax an authorization denial.
+evaluation. For each candidate harness, the platform removes unauthorized
+action-indicating elements using that harness's stage threshold before its CEL
+predicate runs, and `event` remains null. Neither path lets a CEL expression
+override or relax an authorization denial.
 
 ### Per-repo configurability
 

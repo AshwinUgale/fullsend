@@ -119,10 +119,14 @@ state become platform responsibilities.
   continues to authorize event-backed dispatch from its event actor. A
   `fullsend poll` entity-discovery run is instead authorized by its trusted
   Fullsend-controlled origin; callers that cannot establish that provenance are
-  denied. Entity history remains untrusted input. Before CEL, the platform MUST
-  independently enumerate action-indicating elements and remove those whose
-  actor's current permission does not meet the applicable stage threshold. CEL
-  can additionally restrict action using the retained elements and their current
+  denied. Entity history remains untrusted input. For each candidate harness,
+  before evaluating its CEL predicate, the platform MUST enumerate a
+  platform-defined closed superset of action-indicating elements for the entity
+  kind and remove those whose actor's current permission does not meet that
+  harness's observation or mutation threshold. Failed, unavailable, or
+  incomplete enumeration denies evaluation of that entity; only successful
+  enumeration may produce an empty set for state-only predicates. CEL can
+  additionally restrict action using the retained elements and their current
   actor permissions, but does not select an element for a later authorization
   gate. Further trust and injection filtering MAY run after CEL routing and
   before the harness pre-script. Neither entity content nor a historical actor

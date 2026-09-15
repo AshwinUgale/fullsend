@@ -325,12 +325,13 @@ The existing design principle is that [the repo is the coordinator](problems/age
 - Poll entity-discovery authorization: `fullsend poll` has no prompting event
   actor; verified, non-user-assertable Fullsend invocation provenance authorizes
   entity enumeration and evaluation, and callers without it are denied. Before
-  CEL, the platform independently enumerates action-indicating entity elements,
-  resolves each actor's current permission, and removes elements below the
-  applicable stage threshold. Later input-selection and injection filtering are
-  defense in depth for prompt construction. Entity-first execution remains
-  disabled until its versioned normalized-entity contract exists. Every run
-  uses the harness's configured identity
+  each candidate harness's CEL predicate, the platform fail-closed enumerates a
+  closed superset of action-indicating entity elements, resolves each actor's
+  current permission, and removes elements below that harness's observation or
+  mutation threshold. Later input-selection and injection filtering are defense
+  in depth for prompt construction. Entity-first execution remains disabled
+  until its versioned normalized-entity contract exists. Every run uses the
+  harness's configured identity
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 
 **Open questions:**
