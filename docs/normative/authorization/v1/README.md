@@ -106,7 +106,8 @@ determined, the actor is denied.
 | `actor.role` is empty or missing | Event fails `NormalizedEvent` validation; never reaches dispatch |
 | Username is empty | Denied |
 | Fullsend poll invocation provenance is missing or unverifiable | Entity discovery denied |
-| Harness entity sources or effective platform eligibility policy are missing or malformed | Scheduled entity discovery denied |
+| Harness entity sources are missing or malformed | That harness is skipped for scheduled evaluation |
+| Effective platform eligibility policy is missing, malformed, or unverifiable | Evaluations governed by that policy are denied |
 
 ## Exceptions
 
