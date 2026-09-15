@@ -58,7 +58,7 @@ the dedicated org-level `<org>/.fullsend` config repo is deprecated
 - Multi-repo management: a `fullsend repos` subcommand group with a declarative `repos.yaml` manifest for managing per-repo installations at scale — install, convergence (provision, sync, upgrade), status, and uninstall across repos and orgs ([ADR 0057](ADRs/0057-repos-management.md), [ADR 0074](ADRs/0074-repos-command-consolidation.md)).
 - Dispatch version-skew resolution: per-repo `reusable-dispatch.yml` inlines stage workflow jobs directly, eliminating `@v0` references to `reusable-{stage}.yml` ([ADR 0062](ADRs/0062-dispatch-version-skew.md)).
 - Ready-made configuration presets: `fullsend github setup --config <path-or-url>` installs a vendor preset as `.fullsend/config.base.yaml` and a stub `.fullsend/config.yaml` overlay in the target repository; mint URL, inference backend, and related settings live in configuration files resolved through accessor methods, not CLI flags. Shared-infrastructure presets will reduce per-adopter enrollment (target state): mint via `job_workflow_ref` trust per [ADR 0059](ADRs/0059-public-mint-mode-with-wildcard-allowlists.md); inference authorization model undecided ([ADR 0069](ADRs/0069-ready-made-configuration-presets.md)); enrollment remains required until follow-on ADRs land.
-- GitLab event dispatch: two-path model — native CI triggers (`merge_request_event`) for MR events, cron-based polling for issues/comments/labels. No external infrastructure (no webhook bridge). Bot PAT stored as a protected CI/CD variable. Per-repo only ([ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md)).
+- GitLab event dispatch: two-path model — cron-based polling for issues/comments/labels, MR-open review, and MR-merge retro; native `merge_request_event` no-ops review because protected CI/CD variables are unavailable on unprotected MR refs. No external infrastructure (no webhook bridge). Bot PAT stored as a protected CI/CD variable. Per-repo only ([ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md)).
 
 **Open questions:**
 
@@ -289,7 +289,7 @@ The existing design principle is that [the repo is the coordinator](problems/age
   via source-native write-then-verify locks, and feeds the same dispatch pipeline
   as webhooks ([ADR 0063](ADRs/0063-polling-based-work-discovery.md)). Initial
   scope is per-repo mode only.
-- GitLab dispatch uses cron-polled scheduled pipelines for issue/comment/label events and native `merge_request_event` for MR events. No webhook bridge required (see [ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md)).
+- GitLab dispatch uses cron-polled scheduled pipelines for issue/comment/label events, MR-open review, and MR-merge retro. Native `merge_request_event` no-ops review (protected variables are unavailable on MR refs). No webhook bridge required (see [ADR 0067](ADRs/0067-gitlab-cron-polling-event-dispatch.md)).
 - Conversation participation: GitHub Discussions (and future chat systems) enter
   dispatch as `NormalizedEvent` entities with `entity.kind: conversation`,
   express threading on `transition.comment.id` / `parent_id` (`parent_id` always
@@ -401,6 +401,7 @@ the inheritance model: fullsend defaults, then repo baseline (`config.base.yaml`
 - Runtime resolution: `fullsend run <name>` resolves agents in two tiers: (1) config entries from `OrgConfig.Agents` (highest priority), (2) runtime fallback to the `fullsend-ai/agents` repository for known first-party agents not in config. The agents-repo fallback is a transitional mechanism for the agent extraction; it will be removed once all users have migrated to config-driven registration (ADR 0058 Phase 5).
 - Config lookup: config entries are looked up directly via `findConfigAgentEntry`; the agents-repo fallback operates independently when the agent is not found in config. Builds on [ADR 0045](ADRs/0045-forge-portable-harness-schema.md) harness identity model.
 - CLI management: `fullsend agent add|list|set|update|remove` manages config entries and auto-pins URLs to a commit SHA with an integrity hash.
+- Agent generation: `fullsend agent new <name>` writes a complete custom agent — harness, agent definition, result schema, post-script, and the policy, providers and profiles a per-repo install does not vendor — validates it with the loader dispatch uses, and registers it through the `agent add` path above. A `trigger:` is mandatory, because a trigger-less harness registers and validates and is then silently never dispatched; `--role` is a closed table of the roles the hosted mint serves, so an unservable role fails locally rather than as a `403` at first dispatch ([ADR 0102](ADRs/0102-generate-custom-agents-from-the-cli.md)).
 
 **Open questions:**
 
@@ -859,9 +860,9 @@ flowchart TB
     end
     subgraph PL["runtime: pi"]
       direction TB
-      P1["/sandbox/pi-config\nAPPEND_SYSTEM.md · settings.json · skills/\nhooks/ · fullsend-hooks.js · fullsend-manifest.json"]
+      P1["/sandbox/pi-config\nAPPEND_SYSTEM.md · settings.json · skills/\nhooks/ · fullsend-hooks.js · fullsend-edit-repair.js · fullsend-manifest.json"]
       P0{"shell guard, before .env:\nadapter present and SHA-256 = embedded copy?\nmanifest present?"}
-      P2["pi --print --mode json --no-approve\n--no-extensions [-e anthropic-vertex, on Vertex] -e fullsend-hooks.js\n--tools … --model anthropic-vertex/… #lt;/dev/null"]
+      P2["pi --print --mode json --no-approve\n--no-extensions [-e anthropic-vertex, on Vertex] -e fullsend-hooks.js\n[-e fullsend-edit-repair.js, with edit] --tools … --model anthropic-vertex/… #lt;/dev/null"]
       PX["exit 97 — never runs unhooked\n(Run refuses earlier, exit -1, if the manifest has no hook plan)"]
       P1 --> P0
       P0 -- yes --> P2
