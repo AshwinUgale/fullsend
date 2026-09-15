@@ -97,9 +97,12 @@ state become platform responsibilities.
   versioned normative specification.
 - **Scheduling:** Recurring evaluation MAY be initiated by a platform/default
   clock or constrained by scheduling metadata in the harness. The clock is
-  scheduling machinery, not an authorization principal. Harness enablement and
-  platform policy determine whether scheduled evaluation is permitted; every
-  resulting run uses the harness's configured agent identity and permissions.
+  scheduling machinery, not an authorization principal. Scheduled entity
+  discovery is denied unless the harness opts in through valid entity sources
+  and effective platform policy permits it; missing or malformed eligibility
+  data denies evaluation. The effective schedule may still come from platform
+  defaults or harness metadata. Every resulting run uses the harness's
+  configured agent identity and permissions.
 - **Authorization:** [ADR 0054](0054-require-authorization-on-all-agent-dispatch-paths.md)
   continues to authorize event-backed dispatch from its event actor. A
   `fullsend poll` entity-discovery run is instead authorized by its trusted

@@ -105,6 +105,8 @@ determined, the actor is denied.
 | Custom repository roles (GitHub) | Mapped to `none`; denied until custom roles are handled platform-wide |
 | `actor.role` is empty or missing | Event fails `NormalizedEvent` validation; never reaches dispatch |
 | Username is empty | Denied |
+| Fullsend poll invocation provenance is missing or unverifiable | Entity discovery denied |
+| Harness entity sources or effective platform eligibility policy are missing or malformed | Scheduled entity discovery denied |
 
 ## Exceptions
 
@@ -209,12 +211,14 @@ Fullsend poll invocation
 Harness `trigger` expressions express **routing**, not permission policy.
 A CEL expression may **tighten** dispatch conditions (e.g., require a
 specific label, restrict to non-fork PRs, filter by bot identity) but
-may **never weaken** the platform authorization gate. An event that fails
-authorization never reaches CEL evaluation.
+may **never weaken** the platform authorization gate. On the event-backed path,
+an event that fails authorization never reaches CEL evaluation.
 
-This separation is enforced architecturally: `IsAuthorized()` runs
-before `MatchHarnesses()` in the dispatch core. There is no mechanism
-for a CEL expression to override or relax an authorization denial.
+This separation is enforced architecturally: on the event-backed path,
+`IsAuthorized()` runs before `MatchHarnesses()` in the dispatch core. On the
+entity-discovery path, the trusted-origin gate runs before enumeration and CEL
+evaluation, and `event` remains null. Neither path lets a CEL expression
+override or relax an authorization denial.
 
 ### Per-repo configurability
 
