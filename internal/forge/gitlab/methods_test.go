@@ -2687,11 +2687,19 @@ func TestCreatePullRequestReview_Approve_403NoFallback(t *testing.T) {
 	assert.False(t, noteCalled, "non-401 approve failures must not fall back to a note")
 }
 
-func TestCreatePullRequestReview_Approve_401FallbackNoteFailure(t *testing.T) {
+// TestCreatePullRequestReview_Approve_SkipsCallWhenAuthorMatchesNoteFailure
+// covers the pre-call skip path (matching bot/author identity, so the
+// approve call is never attempted) when the fallback note itself fails to
+// post. The /approve handler below is registered only to assert it is
+// never reached; the 401 it would return is irrelevant here because the
+// pre-call identity check short-circuits before any approve call is made.
+func TestCreatePullRequestReview_Approve_SkipsCallWhenAuthorMatchesNoteFailure(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()
 
+	approveCalled := false
 	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		approveCalled = true
 		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
 			"message": "401 Unauthorized",
 		})
@@ -2706,6 +2714,7 @@ func TestCreatePullRequestReview_Approve_401FallbackNoteFailure(t *testing.T) {
 	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "", "sha123", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "post approval fallback comment")
+	assert.False(t, approveCalled, "matching identity must skip the approve call outright, not reach it and recover from a 401")
 }
 
 func TestIsCredentialFailure(t *testing.T) {

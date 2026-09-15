@@ -702,7 +702,7 @@ func isCredentialFailure(msg string) bool {
 func (c *LiveClient) isAuthenticatedUserMRAuthor(ctx context.Context, owner, repo string, number int) (bool, error) {
 	authUser, err := c.GetAuthenticatedUser(ctx)
 	if err != nil {
-		return false, fmt.Errorf("get authenticated user: %w", err)
+		return false, fmt.Errorf("check authenticated user: %w", err)
 	}
 	if authUser == "" {
 		return false, fmt.Errorf("get authenticated user: empty username")
