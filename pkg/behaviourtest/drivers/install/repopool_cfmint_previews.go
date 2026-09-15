@@ -314,6 +314,13 @@ func envSuiteName() string {
 	return "bt"
 }
 
+// envConfigPreset returns the optional config base layer preset path or
+// URL from BEHAVIOUR_CONFIG_PRESET. Empty when unset, so github setup
+// is invoked without --config.
+func envConfigPreset() string {
+	return os.Getenv("BEHAVIOUR_CONFIG_PRESET")
+}
+
 // envAppSet returns the app set for PEM bootstrap from env or a default.
 func envAppSet() string {
 	if v := os.Getenv("BEHAVIOUR_APP_SET"); v != "" {

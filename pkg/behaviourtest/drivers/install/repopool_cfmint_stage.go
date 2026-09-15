@@ -121,8 +121,9 @@ func buildStageMintDriver(
 
 	// Non-vendored setup opts — use --fullsend-ref=main.
 	setupOpts := common.GitHubSetupOpts{
-		Vendor:      false,
-		FullsendRef: stageFullsendRef,
+		Vendor:       false,
+		FullsendRef:  stageFullsendRef,
+		ConfigPreset: envConfigPreset(),
 	}
 
 	e2eCfg := e2etest.EnvConfig{
