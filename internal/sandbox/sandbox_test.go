@@ -15,8 +15,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/fullsend-ai/fullsend/internal/resolve"
 )
 
 func TestEnsureAvailable_OpenshellNotInPath(t *testing.T) {
@@ -129,22 +127,6 @@ func TestCollectLogs_InvalidSource(t *testing.T) {
 
 	_, err := CollectLogs("test-sandbox", "invalid-source")
 	assert.Error(t, err)
-}
-
-func TestCollectProfileIDs_FromSandbox(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.yaml"), []byte("id: actual-id\nname: something"), 0o644))
-	ids, err := resolve.CollectProfileIDs(dir)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"actual-id"}, ids)
-}
-
-func TestCollectProfileIDs_MissingID(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.yaml"), []byte("name: something"), 0o644))
-	_, err := resolve.CollectProfileIDs(dir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no id field")
 }
 
 func TestEnableProvidersV2_OpenshellNotInPath(t *testing.T) {

@@ -200,6 +200,10 @@ Result after merge and resolution:
 - **Local providers** are not checked here — their `type` references
   gateway-resident profiles, and the gateway itself rejects unknown types at
   `openshell provider create` time.
+  > **Update (#7095):** this is no longer accurate; `checkProviderProfileIntegrity`
+  > now validates all providers uniformly and does not read `FromURL`, so local
+  > providers are checked against harness-resolved profiles the same as
+  > URL-resolved providers (see [ADR 0075](0075-local-path-profiles-providers.md)).
 - When URL-resolved providers exist but no URL-resolved profiles are declared,
   a warning is emitted (referential integrity cannot be verified ahead of time).
   > **Update (#7095):** this case is no longer a warning; `checkProviderProfileIntegrity`
