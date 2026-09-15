@@ -77,9 +77,9 @@ state become platform responsibilities.
   entity-state condition that can succeed when `event` is null. Harnesses
   without entity sources remain event-triggered only, always receive an event,
   and need no compatibility change to existing event-based predicates. Trigger
-  CEL represents a missing event as CEL null; overlay `when` evaluation remains
-  unchanged and uses an empty map guarded with `has(event.source)` unless a
-  later specification intentionally unifies the two environments.
+  CEL represents a missing event as CEL null. Overlay `when` expressions also
+  receive the required `entity` and nullable `event`, so source-specific
+  selection can inspect entity state when no prompting event exists.
 - **Candidate sources:** Event-driven dispatch resolves the event's entity and
   supplies both values; scheduled discovery supplies the entity with `event`
   set to null. Events are a low-latency source of candidates, not the
@@ -92,11 +92,13 @@ state become platform responsibilities.
   scheduled enumeration and resolution.
 - **Handled-state evidence:** The normalized entity contract MUST provide
   stable cross-system identity, current state, the bounded or queryable
-  activity required by the harness, and actor context. A harness MAY infer that
-  qualifying activity has already been handled from entity state, such as an
-  existing triage comment, or use an explicit per-harness receipt or poll
-  checkpoint. The field-level contract and query-planning protocol belong in a
-  versioned normative specification.
+  activity required by the harness, and actor context. Every action-indicating
+  element, such as a comment containing a slash command, MUST expose actor
+  provenance and the actor's current forge permission level resolved at entity
+  evaluation time. A harness MAY infer that qualifying activity has already
+  been handled from entity state, such as an existing triage comment, or use an
+  explicit per-harness receipt or poll checkpoint. The field-level contract and
+  query-planning protocol belong in a versioned normative specification.
 - **Scheduling:** Recurring evaluation MAY be initiated by a platform/default
   clock or constrained by scheduling metadata in the harness. The clock is
   scheduling machinery, not an authorization principal. Scheduled entity
@@ -111,12 +113,15 @@ state become platform responsibilities.
   continues to authorize event-backed dispatch from its event actor. A
   `fullsend poll` entity-discovery run is instead authorized by its trusted
   Fullsend-controlled origin; callers that cannot establish that provenance are
-  denied. Entity history remains untrusted input. Fullsend filters or minimizes
-  dangerous data before CEL where the normalized entity contract permits,
-  while preserving required fidelity and actor provenance; trusted
-  input-selection layers, including harness pre-scripts, determine which
-  retained actor-originated instructions are actionable. Neither entity content
-  nor a historical actor can alter the run's configured identity or permissions.
+  denied. Entity history remains untrusted input. The platform MUST prevent an
+  action-indicating element from triggering execution unless its actor's current
+  permission meets the applicable stage threshold. It MAY remove unauthorized
+  action-triggering content before CEL, or validate the element selected by CEL
+  before execution; CEL can additionally restrict action to elements whose
+  current actor permissions are present in the entity. Further trust and
+  injection filtering MAY run after CEL routing and before the harness
+  pre-script. Neither entity content nor a historical actor can alter the run's
+  configured identity or permissions.
 
 ## Consequences
 

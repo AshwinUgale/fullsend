@@ -108,6 +108,8 @@ determined, the actor is denied.
 | Fullsend poll invocation provenance is missing or unverifiable | Entity discovery denied |
 | Harness entity sources are missing or malformed | That harness is skipped for scheduled evaluation |
 | Effective platform eligibility policy is missing, malformed, or unverifiable | Scheduled evaluations governed by that policy are denied |
+| Current permission for an action-indicating element's actor is missing or unverifiable | That element cannot trigger execution |
+| Current permission for an action-indicating element's actor is below the applicable stage threshold | That element cannot trigger execution |
 
 ## Exceptions
 
@@ -164,11 +166,21 @@ has trusted Fullsend-controlled invocation provenance. A caller that cannot
 establish that provenance MUST be denied; external callers cannot assert it.
 
 Authorization of the poll origin does not authorize entity content. Before CEL
-evaluation, Fullsend MUST omit or minimize unneeded untrusted fields where the
+evaluation, Fullsend MUST resolve and expose the current forge permission level
+for the actor of every action-indicating element retained in the entity, such as
+a comment containing a slash command. Historical or cached actor relationships
+are insufficient. Fullsend MUST prevent such an element from triggering
+execution unless that current permission meets the applicable observation or
+mutation threshold. The platform MAY enforce this by removing unauthorized
+action-triggering content before CEL, or by validating the element selected by
+CEL before execution. A harness CEL predicate MAY further restrict selection
+using the current actor-permission fields, but cannot weaken the platform gate.
+
+Fullsend MUST omit or minimize other unneeded untrusted fields where the
 normalized entity contract permits, while retaining the state, content, and
-actor provenance required by the harness. Retained actor-originated content
-remains untrusted and MUST pass the harness's trusted input-selection layers
-before it controls agent behavior. Any resulting agent run uses the harness's
+actor provenance required by the harness. Further trust or injection filtering
+MAY run after CEL routing and before the harness pre-script. Retained content
+remains untrusted throughout. Any resulting agent run uses the harness's
 configured identity and permissions.
 
 ## Excluded fields
@@ -204,14 +216,18 @@ Forge event
 
 Fullsend poll invocation
   --> Trusted-origin authorization gate     <-- enforced here
-  --> Entity enumeration, resolution, and minimization
+  --> Entity enumeration and resolution
+  --> Current actor permissions and content minimization
   --> CEL trigger evaluation (event is null)
+  --> Selected-element authorization gate   <-- enforced here
+  --> Further trust/injection filtering
   --> Execution
 ```
 
 ### CEL triggers: routing only
 
-Harness `trigger` expressions express **routing**, not permission policy.
+Harness `trigger` expressions express **routing and may tighten input
+selection**, not platform permission policy.
 A CEL expression may **tighten** dispatch conditions (e.g., require a
 specific label, restrict to non-fork PRs, filter by bot identity) but
 may **never weaken** the platform authorization gate. On the event-backed path,
