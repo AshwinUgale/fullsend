@@ -287,7 +287,8 @@ The existing design principle is that [the repo is the coordinator](problems/age
 - Routing moves from workflow bash to harness CEL `trigger` expressions
   evaluated by `fullsend dispatch` with pluggable input/output drivers
   operating on a `NormalizedEvent` struct
-  ([ADR 0061](ADRs/0061-harness-cel-dispatch.md)).
+  ([ADR 0061](ADRs/0061-harness-cel-dispatch.md), partially superseded by
+  [ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 - Per-repo **polling** complements webhook dispatch: `fullsend poll` uses poll
   input drivers to discover work from remote systems (Jira first), coordinates
   via source-native write-then-verify locks, and feeds the same dispatch pipeline
