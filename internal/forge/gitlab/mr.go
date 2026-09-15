@@ -295,6 +295,10 @@ func (c *LiveClient) UpdatePullRequestBranch(ctx context.Context, owner, repo st
 //   - APPROVE: POST /projects/:id/merge_requests/:iid/approve
 //     When commitSHA is non-empty, it is passed as the "sha" parameter
 //     so GitLab rejects the approval if HEAD has advanced (409 Conflict).
+//     When GitLab rejects the approval because the authenticated user is
+//     the MR author (self-approval is blocked by default), the method
+//     falls back to posting a note that records the approve verdict.
+//     The sticky review comment remains the authoritative record.
 //   - REQUEST_CHANGES or COMMENT: POST a note with the review body,
 //     plus individual notes for each inline comment.
 //     GitLab's Notes API has no commit-pinning parameter, so commitSHA
@@ -318,19 +322,41 @@ func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo st
 		if err != nil {
 			return fmt.Errorf("approve merge request !%d: %w", number, err)
 		}
-		if resp.StatusCode == http.StatusConflict {
+		switch resp.StatusCode {
+		case http.StatusOK, http.StatusCreated:
+			resp.Body.Close()
+		case http.StatusConflict:
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			msg := extractConflictMessage(data)
-			if strings.Contains(strings.ToLower(msg), "already approved") {
-				// Idempotent: already approved (undocumented 409 variant).
-			} else {
+			if !strings.Contains(strings.ToLower(msg), "already approved") {
 				return fmt.Errorf("approve merge request !%d: 409 Conflict: %s", number, msg)
 			}
-		} else if err := checkStatus(resp, http.StatusOK, http.StatusCreated); err != nil {
-			return fmt.Errorf("approve merge request !%d: %w", number, err)
-		} else {
+			// Idempotent: already approved (undocumented 409 variant).
+		case http.StatusUnauthorized:
+			// GitLab returns 401 when merge_requests_author_approval is
+			// false (the default) and the authenticated user is the MR
+			// author. Fall back to a note so post-review still succeeds;
+			// the sticky comment already carries the full verdict.
+			// Genuine credential failures are distinguished by matching
+			// the error body against known self-approval phrasing.
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
+			msg := extractConflictMessage(data)
+			if !isSelfApprovalDenied(msg) {
+				return fmt.Errorf("approve merge request !%d: %w", number, &APIError{
+					StatusCode: http.StatusUnauthorized,
+					Message:    msg,
+				})
+			}
+			if err := c.postApprovalFallbackNote(ctx, proj, number, body); err != nil {
+				return err
+			}
+			// Inline comments still need posting; skip the success-path
+			// body note because the fallback already included it.
+			body = ""
+		default:
+			return fmt.Errorf("approve merge request !%d: %w", number, checkStatus(resp))
 		}
 
 		// If there is also a body, post it as a note.
@@ -583,5 +609,50 @@ func (c *LiveClient) dismissRequestChangesNote(ctx context.Context, proj string,
 		return fmt.Errorf("dismiss note %d on !%d: %w", noteID, mrIID, err)
 	}
 	putResp.Body.Close()
+	return nil
+}
+
+const approvalFallbackNote = "✅ **Review approved** (formal API approval skipped — MR author is the same bot identity)"
+
+// isSelfApprovalDenied reports whether a GitLab 401 body from POST
+// /approve is the self-approval constraint rather than a credential
+// failure. GitLab's default merge_requests_author_approval=false path
+// typically returns a generic "401 Unauthorized" (or an empty body).
+// Explicit credential-failure phrasing is treated as a real error so
+// an expired or invalid token is not silently converted into a note.
+func isSelfApprovalDenied(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	if lower == "" || lower == "unauthorized" || lower == "401 unauthorized" {
+		return true
+	}
+	switch {
+	case strings.Contains(lower, "invalid token"),
+		strings.Contains(lower, "bad credentials"),
+		strings.Contains(lower, "access token"),
+		strings.Contains(lower, "expired"),
+		strings.Contains(lower, "revoked"),
+		strings.Contains(lower, "insufficient_scope"),
+		strings.Contains(lower, "token is invalid"),
+		strings.Contains(lower, "not authenticated"):
+		return false
+	}
+	return strings.Contains(lower, "approv") ||
+		strings.Contains(lower, "author")
+}
+
+// postApprovalFallbackNote records an approve verdict as an MR note when
+// GitLab rejects the formal /approve call because the authenticated user
+// is the MR author.
+func (c *LiveClient) postApprovalFallbackNote(ctx context.Context, proj string, number int, body string) error {
+	fallbackBody := approvalFallbackNote
+	if body != "" {
+		fallbackBody = body + "\n\n" + approvalFallbackNote
+	}
+	notePath := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", proj, number)
+	noteResp, err := c.post(ctx, notePath, map[string]string{"body": fallbackBody})
+	if err != nil {
+		return fmt.Errorf("post approval fallback comment on !%d: %w", number, err)
+	}
+	noteResp.Body.Close()
 	return nil
 }

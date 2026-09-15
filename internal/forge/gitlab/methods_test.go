@@ -2329,6 +2329,190 @@ func TestCreatePullRequestReview_Approve_409AlreadyMerged(t *testing.T) {
 	assert.Contains(t, err.Error(), "409 Conflict")
 }
 
+func TestCreatePullRequestReview_Approve_401SelfApprovalFallback(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
+			"message": "401 Unauthorized",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "", "sha123", nil)
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Equal(t, approvalFallbackNote, notes[0])
+}
+
+func TestCreatePullRequestReview_Approve_401SelfApprovalFallbackWithBody(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
+			"message": "401 Unauthorized",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "LGTM!", "sha123", nil)
+	require.NoError(t, err)
+	require.Len(t, notes, 1, "fallback should combine body into a single note")
+	assert.Contains(t, notes[0], "LGTM!")
+	assert.Contains(t, notes[0], approvalFallbackNote)
+}
+
+func TestCreatePullRequestReview_Approve_401SelfApprovalFallbackWithInline(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
+			"message": "401 Unauthorized",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "LGTM!", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "nit: rename"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 2)
+	assert.Contains(t, notes[0], "LGTM!")
+	assert.Contains(t, notes[0], approvalFallbackNote)
+	assert.Contains(t, notes[1], "`main.go:10`")
+	assert.Contains(t, notes[1], "nit: rename")
+}
+
+func TestCreatePullRequestReview_Approve_401CredentialFailure(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	noteCalled := false
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
+			"message": "401 Unauthorized: invalid token",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		noteCalled = true
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": 1})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "LGTM!", "sha123", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid token")
+	assert.False(t, noteCalled, "credential 401 must not fall back to a note")
+}
+
+func TestCreatePullRequestReview_Approve_401EmptyBodyFallback(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "", "sha123", nil)
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Equal(t, approvalFallbackNote, notes[0])
+}
+
+func TestCreatePullRequestReview_Approve_403NoFallback(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	noteCalled := false
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusForbidden, map[string]string{
+			"message": "403 Forbidden",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		noteCalled = true
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": 1})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "LGTM!", "sha123", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "403")
+	assert.False(t, noteCalled, "non-401 approve failures must not fall back to a note")
+}
+
+func TestCreatePullRequestReview_Approve_401FallbackNoteFailure(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]string{
+			"message": "401 Unauthorized",
+		})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusInternalServerError, map[string]string{
+			"message": "boom",
+		})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "", "sha123", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "post approval fallback comment")
+}
+
+func TestIsSelfApprovalDenied(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "empty", msg: "", want: true},
+		{name: "generic 401", msg: "401 Unauthorized", want: true},
+		{name: "unauthorized only", msg: "Unauthorized", want: true},
+		{name: "padded case", msg: "  401 UNAUTHORIZED  ", want: true},
+		{name: "cannot approve own", msg: "You cannot approve your own merge request", want: true},
+		{name: "author cannot approve", msg: "Author cannot approve this merge request", want: true},
+		{name: "invalid token", msg: "401 Unauthorized: invalid token", want: false},
+		{name: "bad credentials", msg: "Bad credentials", want: false},
+		{name: "access token expired", msg: "access token expired", want: false},
+		{name: "token revoked", msg: "Token is invalid or revoked", want: false},
+		{name: "insufficient scope", msg: "insufficient_scope", want: false},
+		{name: "not authenticated", msg: "not authenticated", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSelfApprovalDenied(tt.msg))
+		})
+	}
+}
+
 func TestCreateRepoSecret_MaskedFallback(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()
