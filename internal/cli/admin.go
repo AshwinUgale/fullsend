@@ -170,7 +170,7 @@ func validateWIFProvider(raw string) error {
 }
 
 // IsHostedMintURL reports whether raw is the hosted community mint URL
-// (mint.fullsend.sh). This check is also used by pkg/e2etest to resolve
+// (mint.fullsend.sh). This check is also used by internal/e2etest to resolve
 // the GCP project for hosted-mint enrollment.
 func IsHostedMintURL(raw string) bool {
 	parsed, err := url.Parse(raw)

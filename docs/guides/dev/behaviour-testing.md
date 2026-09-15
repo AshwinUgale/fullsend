@@ -23,7 +23,12 @@ pkg/behaviourtest/   # RunSuite public entry (build tag: behaviour)
   artifacts/         # Artifact lookup helpers
   drivers/           # SCM, CI, env, install interfaces + v1 impls
   suite/             # InitScenario (tags, hooks, step registration)
-pkg/e2etest/         # Org pool, CLI runner, cleanup (shared with admin e2e)
+```
+
+In-repo live-test infrastructure (not a public API):
+
+```
+internal/e2etest/    # Org pool, CLI runner, cleanup (shared with admin e2e)
 ```
 
 In-repo runner and scenarios:
@@ -467,7 +472,7 @@ func TestBehaviourSuite(t *testing.T) {
 
 `RunSuite` builds the CLI from module `github.com/fullsend-ai/fullsend` (equivalent to `e2etest.BuildModuleBinary`), so the caller's module root is not used. Run with `-tags behaviour` and the same env vars as CI (see above).
 
-Lower-level packages (`world`, `steps`, `drivers`, `suite.InitScenario`, `pkg/e2etest`) remain available for custom bootstraps. Prefer `RunSuite` unless you need to inject drivers the env-based selector does not cover.
+Lower-level packages (`world`, `steps`, `drivers`, `suite.InitScenario`) remain available for custom bootstraps. Org pool and CLI helpers live in `internal/e2etest` and are not importable outside this module. Prefer `RunSuite` unless you need to inject drivers the env-based selector does not cover.
 
 ### API changes
 
@@ -510,4 +515,4 @@ suiteRunner := godog.TestSuite{
 
 **`ci.Driver.WaitForFailedHarnessAgent` addition:** `WaitForFailedHarnessAgent(ctx, owner, repo, agent string, after time.Time) (*forge.WorkflowRun, error)` waits for the named agent's harness run to complete with a terminal failure conclusion (artifact-first detection, job-name fallback) and errors out early when the run succeeds instead. External `ci.Driver` implementations must add this method.
 
-Bump the pinned version when behaviour step vocabulary or `pkg/e2etest` / `pkg/behaviourtest` APIs change.
+Bump the pinned version when behaviour step vocabulary or `pkg/behaviourtest` APIs change.
