@@ -106,6 +106,35 @@ Accepted
 > `fullsend-dispatch.yml`, and "MR review latency is unaffected" under
 > Consequences. Push-to-open-MR (GitHub `synchronize`) is not detected
 > by the poller; use `/fs-review`.
+>
+> **Update (2026-09, #7323):** The single shared bot PAT (see "Credential
+> model" below) means GitLab's own `merge_requests_author_approval=false`
+> default always rejects `POST .../approve` with 401 whenever the
+> authenticated bot identity is also the MR author — which is always true
+> for fullsend-authored MRs on GitLab, since code and review share one
+> identity. That outcome is a certainty, not a possible failure to
+> recover from after the fact, so `CreatePullRequestReview` (APPROVE)
+> checks the authenticated identity against the MR author via
+> `GetAuthenticatedUser` / `GetPullRequestInfo` *before* calling
+> `/approve`, and only when they affirmatively match, skips the call
+> outright and posts an MR note recording the approve verdict instead. A
+> post-hoc check using the same identity comparison remains as a safety
+> net for a 401 that arrives despite the pre-call check (e.g., the
+> identity lookup itself errored, or a future per-role PAT is not the
+> author but project settings still block the approval). In both the
+> pre-call and post-hoc paths, a 401 whose body matches known
+> credential-failure phrasing (`isCredentialFailure` — invalid, expired,
+> or revoked token) is always a hard error, never a note, and any error
+> while performing the identity check itself (including an empty
+> username from either lookup) also fails closed as a hard error rather
+> than falling back. This is a documented trade-off of the single-shared-PAT
+> credential model's interaction with the "no self-approval"
+> defense-in-depth control in [Threat 2 of the security threat
+> model](../problems/security-threat-model.md#threat-2-insider-threat--compromised-credentials):
+> GitHub keeps that separation via distinct bot identities; GitLab's
+> single-PAT model (chosen here for operational simplicity) does not, and
+> this fallback is an accepted consequence of that tradeoff rather than a
+> per-role-token gap to close.
 
 ## Context
 
