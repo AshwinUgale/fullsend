@@ -121,7 +121,7 @@ Agents amplify authority. If a compromised account can trigger agent actions, th
   verified platform invocation and human-reviewed policy and harness revisions
   that authorized it (see
   [ADR 0098](../ADRs/0098-entity-first-harness-evaluation.md))
-- **No self-approval** — an agent that implements a change cannot also approve it
+- **No self-approval** — an agent that implements a change cannot also approve it. On GitHub this separation is real: the code and review stages run as distinct `fullsend-ai-coder[bot]` / `fullsend-ai-review[bot]` identities. On GitLab, [ADR 0067](../ADRs/0067-gitlab-cron-polling-event-dispatch.md) uses a single shared bot PAT for both stages, so GitLab's own self-approval block (`merge_requests_author_approval=false`) always rejects the review agent's approve call on its own MRs; the fallback is to record the approve verdict as an MR note instead of a formal approval, with the sticky review comment remaining the authoritative record. This is a reviewed, accepted exception that follows from the single-shared-PAT credential model in ADR 0067, not a per-role-token gap to close
 - **Rate limiting / anomaly detection** — unusual patterns of agent activity (sudden burst of cross-repo changes, changes to security-sensitive paths) trigger alerts
 - **CODEOWNERS for agent config** — changes to agent rules, permissions, and configuration always require human approval
 - **Separation of duties** — different agents for different concerns, with no single agent having end-to-end authority

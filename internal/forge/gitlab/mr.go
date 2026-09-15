@@ -336,14 +336,29 @@ func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo st
 		case http.StatusUnauthorized:
 			// GitLab returns 401 when merge_requests_author_approval is
 			// false (the default) and the authenticated user is the MR
-			// author. Fall back to a note so post-review still succeeds;
-			// the sticky comment already carries the full verdict.
-			// Genuine credential failures are distinguished by matching
-			// the error body against known self-approval phrasing.
+			// author, but it also returns the same generic 401 body for
+			// other approval-ineligibility reasons. Genuine credential
+			// failures are recognized by known phrasing and always treated
+			// as a hard error. Every other 401 is verified against the
+			// authenticated identity (isAuthenticatedUserMRAuthor) before
+			// falling back to a note — a 401 for a reason other than
+			// self-approval must still surface as an error, not a
+			// false-positive "approved" note. The sticky review comment
+			// remains the authoritative record for the self-approval case.
 			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			msg := extractConflictMessage(data)
-			if !isSelfApprovalDenied(msg) {
+			if isCredentialFailure(msg) {
+				return fmt.Errorf("approve merge request !%d: %w", number, &APIError{
+					StatusCode: http.StatusUnauthorized,
+					Message:    msg,
+				})
+			}
+			isAuthor, err := c.isAuthenticatedUserMRAuthor(ctx, owner, repo, number)
+			if err != nil {
+				return fmt.Errorf("approve merge request !%d: verify self-approval: %w", number, err)
+			}
+			if !isAuthor {
 				return fmt.Errorf("approve merge request !%d: %w", number, &APIError{
 					StatusCode: http.StatusUnauthorized,
 					Message:    msg,
@@ -612,19 +627,20 @@ func (c *LiveClient) dismissRequestChangesNote(ctx context.Context, proj string,
 	return nil
 }
 
-const approvalFallbackNote = "✅ **Review approved** (formal API approval skipped — MR author is the same bot identity)"
+const approvalFallbackNote = "Formal API approval skipped (MR author matches the review bot identity); recording the verdict as a note instead."
 
-// isSelfApprovalDenied reports whether a GitLab 401 body from POST
-// /approve is the self-approval constraint rather than a credential
-// failure. GitLab's default merge_requests_author_approval=false path
-// typically returns a generic "401 Unauthorized" (or an empty body).
-// Explicit credential-failure phrasing is treated as a real error so
-// an expired or invalid token is not silently converted into a note.
-func isSelfApprovalDenied(msg string) bool {
+// isCredentialFailure reports whether a GitLab 401 body from POST
+// /approve indicates a genuine credential problem (invalid, expired, or
+// revoked token) rather than an authorization refusal such as the
+// self-approval block. GitLab returns the same generic "401
+// Unauthorized" body (or an empty body) for both cases, so message text
+// alone cannot distinguish "self-approval" from other approval
+// ineligibility reasons — only known credential-failure phrasing is
+// treated as a hard error here. Every other 401 is verified against the
+// authenticated identity (isAuthenticatedUserMRAuthor) before the
+// caller assumes self-approval and falls back to a note.
+func isCredentialFailure(msg string) bool {
 	lower := strings.ToLower(strings.TrimSpace(msg))
-	if lower == "" || lower == "unauthorized" || lower == "401 unauthorized" {
-		return true
-	}
 	switch {
 	case strings.Contains(lower, "invalid token"),
 		strings.Contains(lower, "bad credentials"),
@@ -634,10 +650,29 @@ func isSelfApprovalDenied(msg string) bool {
 		strings.Contains(lower, "insufficient_scope"),
 		strings.Contains(lower, "token is invalid"),
 		strings.Contains(lower, "not authenticated"):
-		return false
+		return true
 	}
-	return strings.Contains(lower, "approv") ||
-		strings.Contains(lower, "author")
+	return false
+}
+
+// isAuthenticatedUserMRAuthor reports whether the authenticated bot
+// identity is the author of the given merge request. It is used to
+// confirm a genuine GitLab self-approval 401 (merge_requests_author_approval
+// is false and the authenticated user is the MR author) before
+// CreatePullRequestReview falls back to posting a note in place of a
+// formal approval. An error here means the check could not be performed;
+// callers must fail closed (return the error) rather than assume
+// self-approval.
+func (c *LiveClient) isAuthenticatedUserMRAuthor(ctx context.Context, owner, repo string, number int) (bool, error) {
+	authUser, err := c.GetAuthenticatedUser(ctx)
+	if err != nil {
+		return false, fmt.Errorf("get authenticated user: %w", err)
+	}
+	info, err := c.GetPullRequestInfo(ctx, owner, repo, number)
+	if err != nil {
+		return false, fmt.Errorf("get merge request !%d author: %w", number, err)
+	}
+	return info.AuthorID == authUser, nil
 }
 
 // postApprovalFallbackNote records an approve verdict as an MR note when

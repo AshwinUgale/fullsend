@@ -106,6 +106,24 @@ Accepted
 > `fullsend-dispatch.yml`, and "MR review latency is unaffected" under
 > Consequences. Push-to-open-MR (GitHub `synchronize`) is not detected
 > by the poller; use `/fs-review`.
+>
+> **Update (2026-09, #7323):** The single shared bot PAT (see "Credential
+> model" below) means GitLab's own `merge_requests_author_approval=false`
+> default rejects `POST .../approve` with 401 whenever the authenticated
+> bot identity is also the MR author — which is always true for
+> fullsend-authored MRs on GitLab, since code and review share one
+> identity. `CreatePullRequestReview` (APPROVE) now verifies the 401
+> against the authenticated identity via `GetAuthenticatedUser` /
+> `GetPullRequestInfo` and, only when that identity check confirms
+> self-approval, falls back to posting an MR note recording the approve
+> verdict instead of failing `post-review` outright. This is a reviewed,
+> accepted interaction with the "no self-approval" defense-in-depth
+> control in [Threat 2 of the security threat
+> model](../problems/security-threat-model.md#threat-2-insider-threat--compromised-credentials):
+> GitHub keeps that separation via distinct bot identities; GitLab's
+> single-PAT model (chosen here for operational simplicity) does not, and
+> this fallback is an accepted consequence of that tradeoff rather than a
+> per-role-token gap to close.
 
 ## Context
 
