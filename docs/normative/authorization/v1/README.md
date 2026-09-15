@@ -107,7 +107,7 @@ determined, the actor is denied.
 | Username is empty | Denied |
 | Fullsend poll invocation provenance is missing or unverifiable | Entity discovery denied |
 | Harness entity sources are missing or malformed | That harness is skipped for scheduled evaluation |
-| Effective platform eligibility policy is missing, malformed, or unverifiable | Evaluations governed by that policy are denied |
+| Effective platform eligibility policy is missing, malformed, or unverifiable | Scheduled evaluations governed by that policy are denied |
 
 ## Exceptions
 
@@ -183,9 +183,11 @@ used for dispatch gating:
 | `actor.is_entity_author` | Being the author of an issue or PR does not grant repository permissions. This field supports routing decisions in CEL triggers, not authorization. |
 
 **Principle:** relationship and contribution-history fields are not
-evidence of current authority. Authorization must be derived from the
-forge's permission model at event time, not from cached or inferred
-relationships.
+evidence of current authority. Event-backed authorization must be derived from
+the forge's permission model at event time, not from cached or inferred
+relationships. Fullsend-originated entity discovery must instead be authorized
+from trusted Fullsend-controlled invocation provenance; historical actors and
+relationship fields must not serve as its dispatch gate.
 
 ## Enforcement point
 
