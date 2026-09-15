@@ -13,6 +13,10 @@
 #
 # When done, the runner is online and accepting jobs tagged with RUNNER_TAG.
 #
+# setup.sh (step 5) is idempotent — safe to re-run in place as a
+# developer/debug convenience. Recreation (drain → delete → create) is
+# the compliance path; see issue #7257.
+#
 # Two modes:
 #   RUNNER_TOKEN — join an existing runner pool. Multiple VMs share one
 #                  GitLab runner registration (glrt-* token). GL_TOKEN and
@@ -190,7 +194,7 @@ for tool in oc virtctl python3 curl timeout sha256sum; do
   fi
 done
 for _f in setup.sh create-openshift-vm.sh vm.yaml gitlab-runner-version.sh \
-  executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh; do
+  executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh executor/gateway.sh; do
   if [ ! -f "${SCRIPT_DIR}/${_f}" ]; then
     echo "ERROR: required file not found: ${SCRIPT_DIR}/${_f}" >&2
     _missing=1
@@ -402,7 +406,7 @@ for file in setup.sh create-openshift-vm.sh vm.yaml gitlab-runner-version.sh; do
     -c "cat > ~/gitlab-runner-vm/${file}" < "${SCRIPT_DIR}/${file}"
 done
 
-for file in job_id.sh prepare.sh run.sh cleanup.sh; do
+for file in job_id.sh prepare.sh run.sh cleanup.sh gateway.sh; do
   virtctl -n "${NAMESPACE}" ssh "${VM_USER}"@vm/"${vm_name}" \
     -t "-o StrictHostKeyChecking=no" -t "-o UserKnownHostsFile=/dev/null" \
     -c "cat > ~/gitlab-runner-vm/executor/${file}" < "${SCRIPT_DIR}/executor/${file}"
@@ -425,7 +429,7 @@ virtctl -n "${NAMESPACE}" ssh "${VM_USER}"@vm/"${vm_name}" \
 echo "==> Verifying copied files"
 {
   (cd "${SCRIPT_DIR}" && sha256sum setup.sh create-openshift-vm.sh vm.yaml gitlab-runner-version.sh \
-    executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh)
+    executor/job_id.sh executor/prepare.sh executor/run.sh executor/cleanup.sh executor/gateway.sh)
   (cd "${REPO_ROOT}/.github/scripts" \
     && sha256sum install-openshell.sh openshell-version.sh \
     | sed 's|  |  .github/scripts/|')
