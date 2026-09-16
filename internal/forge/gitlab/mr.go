@@ -308,14 +308,18 @@ func (c *LiveClient) UpdatePullRequestBranch(ctx context.Context, owner, repo st
 //     The sticky review comment remains the authoritative record either
 //     way.
 //   - REQUEST_CHANGES or COMMENT: POST a note with the review body,
-//     plus individual notes for each inline comment.
+//     plus inline comments (see below).
 //     GitLab's Notes API has no commit-pinning parameter, so commitSHA
-//     cannot be enforced for these events.
+//     cannot be enforced for the review-body note.
 //
-// Inline comments are posted as plain MR notes with file:line in the body
-// text, not as positioned diff comments. GitLab's Discussions API supports
-// positioned comments but requires base/head/start SHAs that are not
-// available through the forge.Client interface.
+// Inline comments with a line number are posted as positioned diff
+// discussions (POST .../discussions) using the MR's current diff_refs.
+// When commitSHA is non-empty, the discussion is only positioned if
+// diff_refs.head_sha matches, so findings from an older revision are
+// not attached to a newer diff. File-level comments (Line == 0),
+// comments whose position cannot be resolved, and comments rejected
+// by the Discussions API fall back to general MR notes with a
+// `path:line` prefix — the same non-inline path used previously.
 func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo string, number int, event, body, commitSHA string, comments []forge.ReviewComment) error {
 	proj := projectPath(owner, repo)
 
@@ -431,22 +435,137 @@ func (c *LiveClient) CreatePullRequestReview(ctx context.Context, owner, repo st
 		return fmt.Errorf("create review on !%d: invalid event %q", number, event)
 	}
 
-	// Post inline comments as individual notes referencing file and line.
+	return c.postInlineComments(ctx, proj, number, commitSHA, comments)
+}
+
+// mrDiffRefs is the GitLab diff_refs object that identifies a specific
+// merge-request diff version. The Discussions API requires all three
+// SHAs to attach a comment to a diff line.
+type mrDiffRefs struct {
+	BaseSHA  string
+	StartSHA string
+	HeadSHA  string
+}
+
+// usable reports whether refs can be used to position a discussion on
+// the reviewed revision. All three SHAs must be present. When
+// commitSHA is non-empty it must match HeadSHA so a finding based on
+// an older HEAD is not pinned to a newer diff.
+func (r *mrDiffRefs) usable(commitSHA string) bool {
+	if r == nil || r.BaseSHA == "" || r.StartSHA == "" || r.HeadSHA == "" {
+		return false
+	}
+	if commitSHA != "" && !strings.EqualFold(r.HeadSHA, commitSHA) {
+		return false
+	}
+	return true
+}
+
+// getMergeRequestDiffRefs fetches the current diff_refs for an MR.
+func (c *LiveClient) getMergeRequestDiffRefs(ctx context.Context, proj string, number int) (*mrDiffRefs, error) {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", proj, number)
+	resp, err := c.get(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("get merge request !%d diff refs: %w", number, err)
+	}
+	var mr struct {
+		DiffRefs struct {
+			BaseSHA  string `json:"base_sha"`
+			StartSHA string `json:"start_sha"`
+			HeadSHA  string `json:"head_sha"`
+		} `json:"diff_refs"`
+	}
+	if err := decodeJSON(resp, &mr); err != nil {
+		return nil, fmt.Errorf("decode merge request !%d diff refs: %w", number, err)
+	}
+	return &mrDiffRefs{
+		BaseSHA:  mr.DiffRefs.BaseSHA,
+		StartSHA: mr.DiffRefs.StartSHA,
+		HeadSHA:  mr.DiffRefs.HeadSHA,
+	}, nil
+}
+
+// postInlineComments publishes review comments. Line-level comments are
+// posted as positioned discussions when the MR's current diff_refs
+// match the reviewed commit; otherwise they fall back to general notes.
+// File-level comments (Line == 0) always use notes.
+func (c *LiveClient) postInlineComments(ctx context.Context, proj string, number int, commitSHA string, comments []forge.ReviewComment) error {
+	var refs *mrDiffRefs
 	for _, rc := range comments {
-		notePath := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", proj, number)
-		noteBody := rc.Body
 		if rc.Line > 0 {
-			noteBody = fmt.Sprintf("`%s:%d`\n\n%s", rc.Path, rc.Line, rc.Body)
-		} else {
-			noteBody = fmt.Sprintf("`%s`\n\n%s", rc.Path, rc.Body)
+			fetched, err := c.getMergeRequestDiffRefs(ctx, proj, number)
+			if err == nil {
+				refs = fetched
+			}
+			break
 		}
-		resp, err := c.post(ctx, notePath, map[string]string{"body": noteBody})
-		if err != nil {
-			return fmt.Errorf("post inline comment on !%d (%s:%d): %w", number, rc.Path, rc.Line, err)
-		}
-		resp.Body.Close()
 	}
 
+	for _, rc := range comments {
+		if rc.Line > 0 && refs.usable(commitSHA) {
+			if err := c.postDiffDiscussion(ctx, proj, number, refs, rc); err == nil {
+				continue
+			}
+		}
+		if err := c.postInlineNote(ctx, proj, number, rc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// discussionPosition is the GitLab Discussions API position object for
+// a single-line text comment on the new (right-hand) side of a diff.
+type discussionPosition struct {
+	BaseSHA      string `json:"base_sha"`
+	StartSHA     string `json:"start_sha"`
+	HeadSHA      string `json:"head_sha"`
+	PositionType string `json:"position_type"`
+	NewPath      string `json:"new_path"`
+	OldPath      string `json:"old_path"`
+	NewLine      int    `json:"new_line,omitempty"`
+}
+
+type discussionRequest struct {
+	Body     string             `json:"body"`
+	Position discussionPosition `json:"position"`
+}
+
+func (c *LiveClient) postDiffDiscussion(ctx context.Context, proj string, number int, refs *mrDiffRefs, rc forge.ReviewComment) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/discussions", proj, number)
+	payload := discussionRequest{
+		Body: rc.Body,
+		Position: discussionPosition{
+			BaseSHA:      refs.BaseSHA,
+			StartSHA:     refs.StartSHA,
+			HeadSHA:      refs.HeadSHA,
+			PositionType: "text",
+			NewPath:      rc.Path,
+			OldPath:      rc.Path,
+			NewLine:      rc.Line,
+		},
+	}
+	resp, err := c.post(ctx, path, payload)
+	if err != nil {
+		return fmt.Errorf("post diff discussion on !%d (%s:%d): %w", number, rc.Path, rc.Line, err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (c *LiveClient) postInlineNote(ctx context.Context, proj string, number int, rc forge.ReviewComment) error {
+	notePath := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", proj, number)
+	noteBody := rc.Body
+	if rc.Line > 0 {
+		noteBody = fmt.Sprintf("`%s:%d`\n\n%s", rc.Path, rc.Line, rc.Body)
+	} else {
+		noteBody = fmt.Sprintf("`%s`\n\n%s", rc.Path, rc.Body)
+	}
+	resp, err := c.post(ctx, notePath, map[string]string{"body": noteBody})
+	if err != nil {
+		return fmt.Errorf("post inline comment on !%d (%s:%d): %w", number, rc.Path, rc.Line, err)
+	}
+	resp.Body.Close()
 	return nil
 }
 

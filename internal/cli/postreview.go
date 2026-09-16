@@ -531,8 +531,8 @@ func formatFindingComment(f ReviewFinding) string {
 // is422Error reports whether err wraps a GitHub 422 Unprocessable Entity
 // API error. Used to detect inline comment validation failures.
 // NOTE: only matches *gh.APIError — GitLab errors won't trigger the
-// 422 fallback. This is acceptable because GitLab posts inline findings
-// as plain note text, not positioned diff comments.
+// 422 fallback. The GitLab client handles unpositionable findings
+// internally (positioned discussion, then note fallback).
 func is422Error(err error) bool {
 	var apiErr *gh.APIError
 	if errors.As(err, &apiErr) {

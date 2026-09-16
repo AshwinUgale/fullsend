@@ -631,6 +631,8 @@ func TestCreatePullRequestReview_Comment(t *testing.T) {
 		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes), "body": body["body"]})
 	})
 
+	// No MR endpoint is registered, so fetching diff_refs fails and the
+	// line-level finding falls back to a general note.
 	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "Review body", "sha123", []forge.ReviewComment{
 		{Path: "main.go", Line: 10, Body: "Fix this"},
 	})
@@ -663,6 +665,412 @@ func TestCreatePullRequestReview_CommentWithFileLevel(t *testing.T) {
 	assert.Contains(t, notes[0], "File-level comment")
 	// Should NOT contain a line number
 	assert.NotContains(t, notes[0], "readme.md:0")
+}
+
+func mockMRDiffRefs(t *testing.T, mux *http.ServeMux, headSHA string) {
+	t.Helper()
+	mockMRDiffRefsFull(t, mux, "base-sha", "start-sha", headSHA)
+}
+
+func mockMRDiffRefsFull(t *testing.T, mux *http.ServeMux, baseSHA, startSHA, headSHA string) {
+	t.Helper()
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"iid": 30,
+			"sha": headSHA,
+			"diff_refs": map[string]string{
+				"base_sha":  baseSHA,
+				"start_sha": startSHA,
+				"head_sha":  headSHA,
+			},
+		})
+	})
+}
+
+type capturedDiscussion struct {
+	Body     string `json:"body"`
+	Position struct {
+		BaseSHA      string `json:"base_sha"`
+		StartSHA     string `json:"start_sha"`
+		HeadSHA      string `json:"head_sha"`
+		PositionType string `json:"position_type"`
+		NewPath      string `json:"new_path"`
+		OldPath      string `json:"old_path"`
+		NewLine      int    `json:"new_line"`
+	} `json:"position"`
+}
+
+func TestCreatePullRequestReview_Comment_PositionedDiscussion(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	var discussions []capturedDiscussion
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		var d capturedDiscussion
+		readJSONBody(t, r, &d)
+		discussions = append(discussions, d)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "Review body", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1, "review body stays a general note; the finding must not fall back to notes")
+	assert.Equal(t, "Review body", notes[0])
+	require.Len(t, discussions, 1)
+	assert.Equal(t, "Fix this", discussions[0].Body)
+	assert.Equal(t, "text", discussions[0].Position.PositionType)
+	assert.Equal(t, "main.go", discussions[0].Position.NewPath)
+	assert.Equal(t, "main.go", discussions[0].Position.OldPath)
+	assert.Equal(t, 10, discussions[0].Position.NewLine)
+	assert.Equal(t, "base-sha", discussions[0].Position.BaseSHA)
+	assert.Equal(t, "start-sha", discussions[0].Position.StartSHA)
+	assert.Equal(t, "sha123", discussions[0].Position.HeadSHA)
+}
+
+func TestCreatePullRequestReview_Comment_EmptyCommitSHAStillPositions(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "current-head")
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("line-level comment must not fall back to notes when diff_refs are complete and commitSHA is empty")
+	})
+
+	var discussions []capturedDiscussion
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		var d capturedDiscussion
+		readJSONBody(t, r, &d)
+		discussions = append(discussions, d)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, discussions, 1)
+	assert.Equal(t, "current-head", discussions[0].Position.HeadSHA)
+}
+
+func TestCreatePullRequestReview_Comment_SHACaseInsensitive(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "ABC123def")
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("matching SHAs that differ only by case must still position")
+	})
+
+	var discussions int
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		discussions++
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "abc123DEF", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, discussions)
+}
+
+func TestCreatePullRequestReview_Comment_StaleHeadFallsBackToNote(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "newer-head")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("stale head_sha must not create a positioned discussion")
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "reviewed-sha", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`main.go:10`")
+	assert.Contains(t, notes[0], "Fix this")
+}
+
+func TestCreatePullRequestReview_Comment_DiffRefsDecodeErrorFallsBackToNote(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{not-json"))
+	})
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`main.go:10`")
+}
+
+func TestCreatePullRequestReview_Comment_IncompleteDiffRefsFallsBackToNote(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefsFull(t, mux, "base-sha", "", "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("incomplete diff_refs must not create a positioned discussion")
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`main.go:10`")
+}
+
+func TestCreatePullRequestReview_Comment_DiscussionErrorFallsBackToNote(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusBadRequest, map[string]string{
+			"message": "line is not a valid diff position",
+		})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`main.go:10`")
+	assert.Contains(t, notes[0], "Fix this")
+}
+
+func TestCreatePullRequestReview_Comment_MixedPositionedAndFileLevel(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	var discussions []capturedDiscussion
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		var d capturedDiscussion
+		readJSONBody(t, r, &d)
+		discussions = append(discussions, d)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "line-level"},
+		{Path: "readme.md", Line: 0, Body: "file-level"},
+	})
+	require.NoError(t, err)
+	require.Len(t, discussions, 1)
+	assert.Equal(t, "line-level", discussions[0].Body)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`readme.md`")
+	assert.Contains(t, notes[0], "file-level")
+	assert.NotContains(t, notes[0], "readme.md:0")
+}
+
+func TestCreatePullRequestReview_Comment_FileLevelDoesNotFetchDiffRefs(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("file-level comments must not fetch diff_refs")
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("file-level comments must not create discussions")
+	})
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "readme.md", Line: 0, Body: "File-level comment"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+}
+
+func TestCreatePullRequestReview_Comment_NoteFallbackFailure(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusBadRequest, map[string]string{"message": "invalid position"})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusInternalServerError, map[string]string{"message": "boom"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "post inline comment")
+}
+
+func TestCreatePullRequestReview_RequestChanges_PositionedDiscussion(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+
+	var discussions []capturedDiscussion
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		var d capturedDiscussion
+		readJSONBody(t, r, &d)
+		discussions = append(discussions, d)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "REQUEST_CHANGES", "Please fix", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 4, Body: "off-by-one"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], requestChangesMarker)
+	assert.Contains(t, notes[0], "Please fix")
+	require.Len(t, discussions, 1)
+	assert.Equal(t, "off-by-one", discussions[0].Body)
+	assert.Equal(t, 4, discussions[0].Position.NewLine)
+}
+
+func TestMRDiffRefsUsable(t *testing.T) {
+	complete := &mrDiffRefs{BaseSHA: "b", StartSHA: "s", HeadSHA: "h"}
+	assert.True(t, complete.usable(""))
+	assert.True(t, complete.usable("h"))
+	assert.True(t, complete.usable("H"))
+	assert.False(t, complete.usable("other"))
+	assert.False(t, (*mrDiffRefs)(nil).usable("h"))
+	assert.False(t, (&mrDiffRefs{BaseSHA: "b", HeadSHA: "h"}).usable("h"))
+	assert.False(t, (&mrDiffRefs{StartSHA: "s", HeadSHA: "h"}).usable("h"))
+	assert.False(t, (&mrDiffRefs{BaseSHA: "b", StartSHA: "s"}).usable(""))
+}
+
+func TestCreatePullRequestReview_Approve_PositionedDiscussion(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]string{"username": "review-bot"})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"iid":               30,
+			"web_url":           "https://gitlab.com/myorg/myrepo/-/merge_requests/30",
+			"sha":               "sha123",
+			"source_branch":     "feature",
+			"target_branch":     "main",
+			"author":            map[string]any{"id": 1, "username": "human-author"},
+			"source_project_id": 100,
+			"target_project_id": 100,
+			"diff_refs": map[string]string{
+				"base_sha":  "base-sha",
+				"start_sha": "start-sha",
+				"head_sha":  "sha123",
+			},
+		})
+	})
+
+	approved := false
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/approve", func(w http.ResponseWriter, r *http.Request) {
+		approved = true
+		writeJSON(t, w, http.StatusOK, map[string]any{"iid": 30})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("line-level finding on APPROVE must be a discussion, not a note")
+	})
+
+	var discussions []capturedDiscussion
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		var d capturedDiscussion
+		readJSONBody(t, r, &d)
+		discussions = append(discussions, d)
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "abc"})
+	})
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "APPROVE", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "nit"},
+	})
+	require.NoError(t, err)
+	assert.True(t, approved)
+	require.Len(t, discussions, 1)
+	assert.Equal(t, "nit", discussions[0].Body)
 }
 
 func TestCreatePullRequestReview_InvalidEvent(t *testing.T) {
