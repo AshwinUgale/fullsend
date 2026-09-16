@@ -89,8 +89,9 @@ func TestRunEmptyPoll(t *testing.T) {
 func TestRunSlashMode(t *testing.T) {
 	// When mode is "slash", the poller should use the fast watermark.
 	now := time.Now()
+	seeded := now.Add(-5 * time.Minute).Format(time.RFC3339)
 	mc := newMockClient()
-	mc.setSlashState(persistedPollState{LastPollAtFast: now.Add(-5 * time.Minute).Format(time.RFC3339)})
+	mc.setSlashState(persistedPollState{LastPollAtFast: seeded})
 
 	p := New(mc, nil, "org/project", withTestSecret(Options{Mode: "slash"}))
 
@@ -102,6 +103,12 @@ func TestRunSlashMode(t *testing.T) {
 	got, ok := mc.getSlashState()
 	if !ok || got.LastPollAtFast == "" {
 		t.Error("fast watermark not updated in slash mode")
+	}
+	if got.LastPollAtFast == seeded {
+		t.Error("expected fast watermark to advance from the seeded value, but updateWatermark did not run")
+	}
+	if _, ok := mc.getPollState(); ok {
+		t.Error("slash mode must not write the events branch")
 	}
 }
 

@@ -58,6 +58,14 @@ type mockClient struct {
 	deletedRefs    []string
 	forceCommits   int
 
+	// pendingSign holds branch → unsigned poll state seeded via
+	// setPollState/setSlashState. It is signed lazily by
+	// GetFileContentAtRef using the owner/repo the caller actually
+	// queries with, since the real HMAC domain (see (*Poller).hmacDomain)
+	// is bound to the project path, and different tests exercise
+	// pollers with different project paths.
+	pendingSign map[string]persistedPollState
+
 	issue    map[int]*Issue // keyed by IID
 	issueErr map[int]error
 	mr       map[int]*MergeRequest // keyed by IID
@@ -88,6 +96,7 @@ func newMockClient() *mockClient {
 		labelEvents:    make(map[int][]ResourceLabelEvent),
 		labelEventsErr: make(map[int]error),
 		files:          make(map[string]map[string][]byte),
+		pendingSign:    make(map[string]persistedPollState),
 		issue:          make(map[int]*Issue),
 		issueErr:       make(map[int]error),
 		mr:             make(map[int]*MergeRequest),
@@ -139,11 +148,14 @@ func (m *mockClient) ListResourceLabelEvents(_ context.Context, _, _ string, iss
 // fails closed on unsigned state.
 const testDispatchSecret = "test-secret"
 
-func hmacDomainForBranch(branch string) string {
+// hmacDomainForBranch mirrors (*Poller).hmacDomain: the domain is the
+// per-branch prefix bound to the querying project (owner/repo).
+func hmacDomainForBranch(branch, projectPath string) string {
+	base := hmacDomainEvents
 	if branch == PollStateBranchSlash {
-		return hmacDomainSlash
+		base = hmacDomainSlash
 	}
-	return hmacDomainEvents
+	return base + projectPath + "\n"
 }
 
 func (m *mockClient) putBranchFile(branch, path string, data []byte) {
@@ -158,6 +170,10 @@ func (m *mockClient) putBranchFile(branch, path string, data []byte) {
 	m.files[branch] = map[string][]byte{path: copied}
 }
 
+// setBranchState seeds a validly-signed document for branch, deferring
+// the actual signing to GetFileContentAtRef (see pendingSign) since the
+// signature is now bound to the project path the poller under test
+// queries with, not just the branch.
 func (m *mockClient) setBranchState(branch string, s persistedPollState) {
 	if branch == PollStateBranchSlash {
 		s = persistedPollState{
@@ -173,16 +189,12 @@ func (m *mockClient) setBranchState(branch string, s persistedPollState) {
 			FailedKeysFull:     s.FailedKeysFull,
 		}
 	}
-	sig, err := computeStateHMAC(testDispatchSecret, hmacDomainForBranch(branch), s)
-	if err != nil {
-		panic(err)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingSign == nil {
+		m.pendingSign = make(map[string]persistedPollState)
 	}
-	s.HMAC = sig
-	data, err := json.Marshal(s)
-	if err != nil {
-		panic(err)
-	}
-	m.putBranchFile(branch, PollStateFileName, data)
+	m.pendingSign[branch] = s
 }
 
 // setPollState seeds a validly-signed events-branch document.
@@ -213,18 +225,23 @@ func (m *mockClient) getBranchState(branch string) (persistedPollState, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	files, ok := m.files[branch]
-	if !ok {
-		return persistedPollState{}, false
+	if ok {
+		data, ok := files[PollStateFileName]
+		if ok {
+			var s persistedPollState
+			if err := json.Unmarshal(data, &s); err != nil {
+				return persistedPollState{}, true
+			}
+			return s, true
+		}
 	}
-	data, ok := files[PollStateFileName]
-	if !ok {
-		return persistedPollState{}, false
+	// Fall back to a seeded-but-not-yet-force-committed document (see
+	// pendingSign): still visible to test assertions even though it
+	// hasn't been materialized into files by an actual write.
+	if s, ok := m.pendingSign[branch]; ok {
+		return s, true
 	}
-	var s persistedPollState
-	if err := json.Unmarshal(data, &s); err != nil {
-		return persistedPollState{}, true
-	}
-	return s, true
+	return persistedPollState{}, false
 }
 
 func (m *mockClient) getPollState() (persistedPollState, bool) {
@@ -235,11 +252,29 @@ func (m *mockClient) getSlashState() (persistedPollState, bool) {
 	return m.getBranchState(PollStateBranchSlash)
 }
 
-func (m *mockClient) GetFileContentAtRef(_ context.Context, _, _, path, ref string) ([]byte, error) {
+func (m *mockClient) GetFileContentAtRef(_ context.Context, owner, repo, path, ref string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fileContentErr != nil {
 		return nil, m.fileContentErr
+	}
+	// Seeded-valid documents (setPollState/setSlashState) are signed
+	// here, using the owner/repo the caller queries with, rather than
+	// at seed time: the real HMAC domain is bound to the project path,
+	// which varies across tests. A real prior write (files[ref]) always
+	// takes precedence over a stale seed.
+	if path == PollStateFileName {
+		if files, ok := m.files[ref]; !ok || files[path] == nil {
+			if s, ok := m.pendingSign[ref]; ok {
+				domain := hmacDomainForBranch(ref, owner+"/"+repo)
+				sig, err := computeStateHMAC(testDispatchSecret, domain, s)
+				if err != nil {
+					return nil, err
+				}
+				s.HMAC = sig
+				return json.Marshal(s)
+			}
+		}
 	}
 	files, ok := m.files[ref]
 	if !ok {
@@ -282,10 +317,13 @@ func (m *mockClient) DeleteRef(_ context.Context, _, _, refPath string) error {
 	if !ok {
 		return fmt.Errorf("unsupported ref path %q", refPath)
 	}
-	if _, exists := m.files[branch]; !exists {
+	_, existsFile := m.files[branch]
+	_, existsPending := m.pendingSign[branch]
+	if !existsFile && !existsPending {
 		return forge.ErrNotFound
 	}
 	delete(m.files, branch)
+	delete(m.pendingSign, branch)
 	return nil
 }
 

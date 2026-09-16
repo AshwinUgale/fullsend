@@ -137,8 +137,9 @@ func TestStateBranch_FastMode(t *testing.T) {
 	if got := p.stateBranch(); got != PollStateBranchSlash {
 		t.Errorf("got %q, want %s", got, PollStateBranchSlash)
 	}
-	if got := p.hmacDomain(); got != hmacDomainSlash {
-		t.Errorf("hmac domain = %q, want %q", got, hmacDomainSlash)
+	want := hmacDomainSlash + p.projectPath + "\n"
+	if got := p.hmacDomain(); got != want {
+		t.Errorf("hmac domain = %q, want %q", got, want)
 	}
 }
 
@@ -148,8 +149,9 @@ func TestStateBranch_FullMode(t *testing.T) {
 	if got := p.stateBranch(); got != PollStateBranchEvents {
 		t.Errorf("got %q, want %s", got, PollStateBranchEvents)
 	}
-	if got := p.hmacDomain(); got != hmacDomainEvents {
-		t.Errorf("hmac domain = %q, want %q", got, hmacDomainEvents)
+	want := hmacDomainEvents + p.projectPath + "\n"
+	if got := p.hmacDomain(); got != want {
+		t.Errorf("hmac domain = %q, want %q", got, want)
 	}
 }
 
@@ -473,6 +475,37 @@ func TestLoadPollState_CrossBranchSubstitutionRejected(t *testing.T) {
 	}
 	if _, ok := mc.getSlashState(); !ok {
 		t.Error("slash branch must be left intact")
+	}
+}
+
+func TestLoadPollState_CrossProjectReplayRejected(t *testing.T) {
+	mc := newMockClient()
+	writer := newTestPoller(mc, Options{})
+	ts := time.Date(2025, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := writer.updateWatermark(context.Background(), "testgroup", "testrepo", ts); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	signed, ok := mc.getPollState()
+	if !ok {
+		t.Fatal("expected poll state")
+	}
+	raw, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Capture the validly-signed document and replay it against a
+	// different project sharing the same FULLSEND_DISPATCH_SECRET.
+	otherMC := newMockClient()
+	otherMC.putBranchFile(PollStateBranchEvents, PollStateFileName, raw)
+	other := newTestPoller(otherMC, Options{})
+	other.projectPath = "othergroup/otherrepo"
+
+	if _, err := other.loadPollState(context.Background(), "othergroup", "otherrepo"); err == nil {
+		t.Fatal("expected cross-project replay to fail HMAC (project binding)")
+	}
+	if _, ok := otherMC.getPollState(); ok {
+		t.Error("replayed document on the other project must be discarded")
 	}
 }
 

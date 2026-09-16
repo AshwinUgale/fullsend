@@ -66,11 +66,18 @@ func (p *Poller) stateBranch() string {
 	return PollStateBranchEvents
 }
 
+// hmacDomain returns the per-branch domain prefix further bound to this
+// project (owner/repo), so a validly-signed document captured from one
+// project cannot be replayed against another project that shares the
+// same FULLSEND_DISPATCH_SECRET. p.projectPath is the same
+// "owner/repo" value dispatch.go mixes into pipeline variables via
+// REPO_FULL_NAME.
 func (p *Poller) hmacDomain() string {
+	base := hmacDomainEvents
 	if p.slashCommandsOnly {
-		return hmacDomainSlash
+		base = hmacDomainSlash
 	}
-	return hmacDomainEvents
+	return base + p.projectPath + "\n"
 }
 
 // modeDocument returns a copy of state containing only the fields this
