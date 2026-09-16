@@ -3895,7 +3895,10 @@ func resolveTraceIdentity(ctx context.Context, tracer trace.Tracer, inboundTP, i
 //     file content. The output file is still parsed best-effort for reason and
 //     other outputs; if parsing fails, the skip proceeds with stdout as the
 //     reason. This lets simple scripts just `echo "No work" && exit 78`.
-//   - Any other non-zero exit: hard failure.
+//   - Any other non-zero exit: hard failure. Captured stdout/stderr is
+//     attached to the error (GHA ::error:: / ##[error] annotations
+//     preferred) so the status comment can show the script's own
+//     message instead of a bare "exit status 1" (issue #7363).
 //
 // A malformed output file on exit 0 is a hard failure so a mistyped skip
 // cannot silently proceed.
@@ -3911,11 +3914,12 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 	preCmd := exec.Command(h.PreScript)
 	preCmd.Env = append(childScriptEnv(h.RunnerEnv, traceparent), prescript.EnvVar+"="+outPath)
 
-	// Tee stdout so we can use it as a fallback skip reason when the
-	// script exits 78 without writing a reason to the output file.
-	var stdoutBuf bytes.Buffer
+	// Tee stdout and stderr so skip-reason fallback (exit 78) and
+	// hard-failure diagnostics can recover the script's own message
+	// while still streaming to the Actions log.
+	var stdoutBuf, stderrBuf bytes.Buffer
 	preCmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-	preCmd.Stderr = os.Stderr
+	preCmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	runErr := preCmd.Run()
 	if runErr != nil {
@@ -3923,6 +3927,10 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != prescript.ExitCodeNeutral {
 			printer.StepFail("Pre-script failed")
+			detail := preScriptFailureDetail(stdoutBuf.String(), stderrBuf.String())
+			if detail != "" {
+				return prescript.Result{}, fmt.Errorf("running pre-script: %w: %s", runErr, detail)
+			}
 			return prescript.Result{}, fmt.Errorf("running pre-script: %w", runErr)
 		}
 
@@ -3963,17 +3971,77 @@ func lastNonEmptyLine(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if l := strings.TrimSpace(lines[i]); l != "" {
-			l = stripControlChars(l)
-			if len(l) > 1024 {
-				l = l[:1024]
-				for len(l) > 0 && !utf8.Valid([]byte(l)) {
-					l = l[:len(l)-1]
-				}
-			}
-			return l
+			return sanitizeScriptLine(l)
 		}
 	}
 	return ""
+}
+
+// preScriptFailureDetail extracts a human-readable explanation from a
+// pre-script's captured stdout and stderr for the hard-failure path
+// (issue #7363). Preference:
+//  1. GitHub Actions error annotations (::error:: / ##[error]) from
+//     either stream, joined in the order they appeared.
+//  2. The last non-empty stderr line.
+//  3. The last non-empty stdout line.
+//
+// Each candidate is sanitized the same way as the exit-78 stdout
+// fallback (control characters stripped, capped at 1024 bytes).
+func preScriptFailureDetail(stdout, stderr string) string {
+	if msg := ghaErrorDetail(stdout + "\n" + stderr); msg != "" {
+		return msg
+	}
+	if msg := lastNonEmptyLine(stderr); msg != "" {
+		return msg
+	}
+	return lastNonEmptyLine(stdout)
+}
+
+func ghaErrorDetail(s string) string {
+	var msgs []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if msg, ok := parseGHAErrorLine(line); ok && msg != "" {
+			msgs = append(msgs, msg)
+		}
+	}
+	if len(msgs) == 0 {
+		return ""
+	}
+	return sanitizeScriptLine(strings.Join(msgs, " "))
+}
+
+// parseGHAErrorLine extracts the message from a GitHub Actions error
+// annotation. Accepts the workflow-command form (::error::msg or
+// ::error k=v::msg) and the logging-command form (##[error]msg).
+func parseGHAErrorLine(line string) (string, bool) {
+	const loggingPrefix = "##[error]"
+	if strings.HasPrefix(line, loggingPrefix) {
+		return strings.TrimSpace(line[len(loggingPrefix):]), true
+	}
+	if !strings.HasPrefix(line, "::error::") && !strings.HasPrefix(line, "::error ") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, "::error")
+	idx := strings.Index(rest, "::")
+	if idx < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[idx+2:]), true
+}
+
+// sanitizeScriptLine strips control characters and caps at 1024 bytes,
+// trimming trailing incomplete UTF-8. Used for skip reasons and
+// hard-failure details recovered from pre-script output.
+func sanitizeScriptLine(s string) string {
+	s = stripControlChars(s)
+	if len(s) > 1024 {
+		s = s[:1024]
+		for len(s) > 0 && !utf8.Valid([]byte(s)) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
 }
 
 func stripControlChars(s string) string {

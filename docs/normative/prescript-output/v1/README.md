@@ -41,7 +41,7 @@ others).
 |-----------|----------|
 | 0 | Parse the output file; `skipped=true` requests a skip. |
 | 78 | Skip unconditionally. Output file is parsed best-effort for `reason` and other outputs; a parse error does not block the skip. |
-| Any other non-zero | Hard failure, unchanged by this protocol. |
+| Any other non-zero | Hard failure. Captured stdout/stderr is attached to the error so the completion status comment can show the script's own message (see [Hard-failure diagnostics](#hard-failure-diagnostics)). |
 
 Exit 78 is complementary to the file-based `skipped=true` mechanism.
 Either one alone is sufficient to request a skip. When a script exits 78,
@@ -61,6 +61,34 @@ exit 78
 The stdout-derived reason is sanitized before use: control characters
 (`U+0000`–`U+001F`, `U+007F`) are stripped — matching the file-based
 value validation — and the result is capped at 1024 bytes.
+
+### Hard-failure diagnostics
+
+When a pre-script exits with a non-zero code other than 78, `fullsend run`
+captures stdout and stderr and includes a human-readable explanation in the
+returned error. The completion status comment renders that error as its
+failure detail, so a circuit-breaker or validation failure is visible on the
+PR instead of a bare `exit status 1` ([issue #7363](https://github.com/fullsend-ai/fullsend/issues/7363)).
+
+Preference, first match wins:
+
+1. GitHub Actions error annotations (`::error::message` or `##[error]message`)
+   from either stream, joined in the order they appeared. Parameterized
+   workflow commands (`::error title=…::message`) contribute the message.
+2. The last non-empty stderr line.
+3. The last non-empty stdout line.
+
+Print an error annotation when the failure is something a human should act
+on:
+
+```sh
+echo "::error::Fix iteration ${ITERATION} exceeds bot cap of ${CAP}. Escalating to human."
+exit 1
+```
+
+Captured text is sanitized the same way as the exit-78 stdout fallback:
+control characters stripped, capped at 1024 bytes. The status comment further
+truncates the rendered detail so it stays on one line.
 
 ### Reserved keys
 
