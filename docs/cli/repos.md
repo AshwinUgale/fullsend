@@ -30,7 +30,9 @@ One-command migration from per-org to per-repo fullsend installation. For each r
 
 1. Check inference WIF status; provision if needed
 2. Install per-repo (scaffold workflows, variables, secrets) with config carried over from the org config
-3. Unenroll from per-org config
+3. Remove the repository entry from per-org config
+
+Successfully migrated repositories — and selected repositories already detected as per-repo installed — are deleted from the source `<org>/.fullsend/config.yaml`. They are not left as `enabled: false`, which would queue them for legacy offboarding. Failed, unselected, and pre-existing disabled entries are left unchanged, as is unrelated configuration. Dry runs do not modify the source config.
 
 Generates a `repos.yaml` manifest reflecting the migrated state. When a `repos.yaml` already exists (e.g. from a previous `--repo`-filtered run), newly migrated repos are merged into it instead of overwriting it. Re-running after a partial migration picks up where it left off.
 
