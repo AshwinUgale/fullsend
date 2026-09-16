@@ -8,6 +8,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/forge/gitlab"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/repos"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
@@ -77,6 +78,40 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 	}
 
 	return botPAT, nil
+}
+
+// provisionGitLabPollState ensures FULLSEND_DISPATCH_SECRET exists so
+// poll-state HMAC signing is on by default, then creates both poll-state
+// branches with an initial signed document. Legacy CI/CD variables are
+// folded in when present (*Fast → slash, *Full + LabelState → events);
+// otherwise each branch is seeded with an empty signed baseline.
+//
+// Only called for already-enrolled (converged / already-current) repos —
+// fresh installs are handled by repos.Install() itself. Safe to run on
+// live repos: it never creates or revokes the bot PAT, so it does not
+// disturb live pipelines. Returns an error if either step fails so the
+// caller can count the repo as failed, matching how fresh installs treat
+// the identical failure as fatal; failures are still logged via StepWarn
+// for operator visibility.
+func provisionGitLabPollState(ctx context.Context, client forge.Client, printer *ui.Printer, owner, repo string) error {
+	repoFullName := owner + "/" + repo
+	dispatchSecret, created, secretErr := poll.EnsureDispatchSecret(ctx, client, owner, repo)
+	if secretErr != nil {
+		printer.StepWarn(fmt.Sprintf("[%s] Could not provision dispatch secret: %v", repoFullName, secretErr))
+		return secretErr
+	}
+	if created {
+		printer.StepDone(fmt.Sprintf("[%s] Provisioned FULLSEND_DISPATCH_SECRET (protected, masked)", repoFullName))
+	}
+	seeded, seedErr := poll.SeedGitLabPollStateBranches(ctx, client, owner, repo, dispatchSecret)
+	if seedErr != nil {
+		printer.StepWarn(fmt.Sprintf("[%s] Could not seed poll-state branches: %v", repoFullName, seedErr))
+		return seedErr
+	}
+	if seeded {
+		printer.StepDone(fmt.Sprintf("[%s] Seeded poll-state branches from legacy vars (or empty baseline)", repoFullName))
+	}
+	return nil
 }
 
 // setupGitLabPipelineSchedules creates two independent pipeline schedules

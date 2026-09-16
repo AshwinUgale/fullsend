@@ -3,11 +3,13 @@ package poll
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -66,26 +68,31 @@ func (p *Poller) stateBranch() string {
 	return PollStateBranchEvents
 }
 
-// hmacDomain returns the per-branch domain prefix further bound to this
-// project (owner/repo), so a validly-signed document captured from one
-// project cannot be replayed against another project that shares the
-// same FULLSEND_DISPATCH_SECRET. p.projectPath is the same
-// "owner/repo" value dispatch.go mixes into pipeline variables via
-// REPO_FULL_NAME.
-func (p *Poller) hmacDomain() string {
+// hmacDomainFor returns the per-branch HMAC domain prefix bound to
+// projectPath ("owner/repo"), so a validly-signed document captured
+// from one project cannot be replayed against another project that
+// shares the same FULLSEND_DISPATCH_SECRET.
+func hmacDomainFor(branch, projectPath string) string {
 	base := hmacDomainEvents
-	if p.slashCommandsOnly {
+	if branch == PollStateBranchSlash {
 		base = hmacDomainSlash
 	}
-	return base + p.projectPath + "\n"
+	return base + projectPath + "\n"
 }
 
-// modeDocument returns a copy of state containing only the fields this
-// poll mode is allowed to persist, so a slash save cannot write events
-// fields (and vice versa) even if they were present on the loaded
-// document.
-func (p *Poller) modeDocument(state persistedPollState) persistedPollState {
-	if p.slashCommandsOnly {
+// hmacDomain returns the per-branch domain prefix further bound to this
+// project (owner/repo). p.projectPath is the same "owner/repo" value
+// dispatch.go mixes into pipeline variables via REPO_FULL_NAME.
+func (p *Poller) hmacDomain() string {
+	return hmacDomainFor(p.stateBranch(), p.projectPath)
+}
+
+// pollStateForMode returns a copy of state containing only the fields
+// the given poll mode is allowed to persist, so a slash save cannot
+// write events fields (and vice versa) even if they were present on
+// the loaded document.
+func pollStateForMode(slash bool, state persistedPollState) persistedPollState {
+	if slash {
 		return persistedPollState{
 			LastPollAtFast:     state.LastPollAtFast,
 			DispatchedKeysFast: state.DispatchedKeysFast,
@@ -98,6 +105,12 @@ func (p *Poller) modeDocument(state persistedPollState) persistedPollState {
 		DispatchedKeysFull: state.DispatchedKeysFull,
 		FailedKeysFull:     state.FailedKeysFull,
 	}
+}
+
+// modeDocument returns a copy of state containing only the fields this
+// poll mode is allowed to persist.
+func (p *Poller) modeDocument(state persistedPollState) persistedPollState {
+	return pollStateForMode(p.slashCommandsOnly, state)
 }
 
 // computeStateHMAC computes an HMAC-SHA256 (hex-encoded) over the
@@ -386,4 +399,154 @@ func toSet(labels []string) map[string]bool {
 		s[l] = true
 	}
 	return s
+}
+
+// buildLegacyPollStateFromVars assembles a persistedPollState from a
+// name-to-value map of pre-branch-store poller CI/CD variables.
+// Returns found=false if none of the seven legacy state vars are present.
+func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (persistedPollState, bool) {
+	var state persistedPollState
+	found := false
+
+	if v, ok := vars[forge.VarLastPollAtFast]; ok {
+		state.LastPollAtFast = v
+		found = true
+	}
+	if v, ok := vars[forge.VarLastPollAtFull]; ok {
+		state.LastPollAtFull = v
+		found = true
+	}
+	if v, ok := vars[forge.VarLabelState]; ok {
+		found = true
+		var ls LabelState
+		if err := json.Unmarshal([]byte(v), &ls); err != nil {
+			log.Printf("WARNING: failed to unmarshal legacy label state for %s/%s, skipping: %v", owner, repo, err)
+		} else {
+			state.LabelState = ls
+		}
+	}
+	if v, ok := vars[forge.VarDispatchedKeysFast]; ok {
+		found = true
+		var m map[string]int64
+		if err := json.Unmarshal([]byte(v), &m); err != nil {
+			log.Printf("WARNING: failed to unmarshal legacy dispatched keys (fast) for %s/%s, skipping: %v", owner, repo, err)
+		} else {
+			state.DispatchedKeysFast = m
+		}
+	}
+	if v, ok := vars[forge.VarDispatchedKeysFull]; ok {
+		found = true
+		var m map[string]int64
+		if err := json.Unmarshal([]byte(v), &m); err != nil {
+			log.Printf("WARNING: failed to unmarshal legacy dispatched keys (full) for %s/%s, skipping: %v", owner, repo, err)
+		} else {
+			state.DispatchedKeysFull = m
+		}
+	}
+	if v, ok := vars[forge.VarFailedKeysFast]; ok {
+		found = true
+		var m map[string]int
+		if err := json.Unmarshal([]byte(v), &m); err != nil {
+			log.Printf("WARNING: failed to unmarshal legacy failed keys (fast) for %s/%s, skipping: %v", owner, repo, err)
+		} else {
+			state.FailedKeysFast = m
+		}
+	}
+	if v, ok := vars[forge.VarFailedKeysFull]; ok {
+		found = true
+		var m map[string]int
+		if err := json.Unmarshal([]byte(v), &m); err != nil {
+			log.Printf("WARNING: failed to unmarshal legacy failed keys (full) for %s/%s, skipping: %v", owner, repo, err)
+		} else {
+			state.FailedKeysFull = m
+		}
+	}
+	return state, found
+}
+
+// EnsureDispatchSecret returns the project's existing
+// FULLSEND_DISPATCH_SECRET CI/CD variable value, or generates and
+// stores a new one (masked, protected, like the bot PAT) if none is
+// set. created is true when a new secret was written. Without this,
+// poll-state HMAC signing requires a manual operator step and the
+// poller fails closed.
+func EnsureDispatchSecret(ctx context.Context, client forge.Client, owner, repo string) (secret string, created bool, err error) {
+	vars, err := client.ListRepoVariables(ctx, owner, repo)
+	if err != nil {
+		return "", false, fmt.Errorf("listing repo variables: %w", err)
+	}
+	if existing, ok := vars[forge.SecretDispatch]; ok && existing != "" {
+		return existing, false, nil
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", false, fmt.Errorf("generating dispatch secret: %w", err)
+	}
+	secret = hex.EncodeToString(buf)
+	if err := client.CreateRepoSecret(ctx, owner, repo, forge.SecretDispatch, secret); err != nil {
+		return "", false, fmt.Errorf("storing dispatch secret: %w", err)
+	}
+	return secret, true, nil
+}
+
+// SeedGitLabPollStateBranches creates both poll-state branches with an
+// HMAC-signed state.json, using the operator's Maintainer-capable
+// client so legacy CI/CD variables can still be read. *Fast fields are
+// written to the slash branch; *Full fields plus LabelState go to the
+// events branch.
+//
+// A missing branch is seeded from any present legacy variables, or with
+// an empty signed baseline when none are present. An already-present
+// state.json is left untouched so live poller writes are not clobbered.
+// dispatchSecret must be non-empty: unsigned documents would be
+// discarded as tampered by the runtime poller.
+//
+// Returns true if at least one branch was written.
+func SeedGitLabPollStateBranches(ctx context.Context, client forge.Client, owner, repo, dispatchSecret string) (bool, error) {
+	if dispatchSecret == "" {
+		return false, errDispatchSecretUnset
+	}
+
+	vars, err := client.ListRepoVariables(ctx, owner, repo)
+	if err != nil {
+		return false, fmt.Errorf("listing repo variables: %w", err)
+	}
+	legacy, _ := buildLegacyPollStateFromVars(vars, owner, repo)
+	projectPath := owner + "/" + repo
+
+	branches := []struct {
+		name  string
+		slash bool
+	}{
+		{PollStateBranchSlash, true},
+		{PollStateBranchEvents, false},
+	}
+
+	seeded := false
+	for _, b := range branches {
+		_, err := client.GetFileContentAtRef(ctx, owner, repo, PollStateFileName, b.name)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, forge.ErrNotFound) {
+			return seeded, fmt.Errorf("checking poll state on %s: %w", b.name, err)
+		}
+
+		doc := pollStateForMode(b.slash, legacy)
+		sig, err := computeStateHMAC(dispatchSecret, hmacDomainFor(b.name, projectPath), doc)
+		if err != nil {
+			return seeded, fmt.Errorf("computing poll state HMAC on %s: %w", b.name, err)
+		}
+		doc.HMAC = sig
+		data, err := json.Marshal(doc)
+		if err != nil {
+			return seeded, fmt.Errorf("marshaling poll state on %s: %w", b.name, err)
+		}
+		if err := client.ForceCommitFileToBranch(ctx, owner, repo, b.name, PollStateFileName, "fullsend: seed poll state", data); err != nil {
+			return seeded, fmt.Errorf("seeding poll state on %s: %w", b.name, err)
+		}
+		seeded = true
+	}
+	return seeded, nil
 }

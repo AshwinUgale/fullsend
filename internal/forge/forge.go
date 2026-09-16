@@ -48,6 +48,12 @@ const (
 	// Secrets — GitLab only.
 	SecretForgeToken = "FULLSEND_FORGE_TOKEN"
 
+	// SecretDispatch is the shared HMAC secret used to sign dispatch
+	// variables and poll-state documents. GitLab install/converge
+	// auto-provisions it as a masked, protected CI/CD variable so
+	// signing is on by default; see poll.EnsureDispatchSecret.
+	SecretDispatch = "FULLSEND_DISPATCH_SECRET"
+
 	// Legacy uninstall-only variables — GitLab.
 	VarLegacyBotTokenSecret = "FULLSEND_BOT_TOKEN_SECRET"
 	VarLegacySA             = "FULLSEND_SA"

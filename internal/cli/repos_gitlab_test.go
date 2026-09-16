@@ -15,6 +15,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/forge/gitlab"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
@@ -524,4 +525,54 @@ func TestCleanupGitLabBotToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, buf.String(), "Could not list project access tokens")
 	})
+}
+
+// Poll-state provisioning itself (legacy-var migration, empty-baseline
+// seeding, skip-existing-branch) is covered directly against
+// SeedGitLabPollStateBranches / EnsureDispatchSecret in
+// internal/poll/state_test.go. The tests below cover only
+// provisionGitLabPollState's own wiring: error propagation and
+// [owner/repo]-prefixed operator messaging.
+
+func TestProvisionGitLabPollState_WarnsOnSecretError(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.Errors["ListRepoVariables"] = fmt.Errorf("forbidden")
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	err := provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	require.Error(t, err)
+	assert.Contains(t, buf.String(), "[group/project] Could not provision dispatch secret")
+}
+
+func TestProvisionGitLabPollState_WarnsOnSeedError(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.VariableValues["group/project/"+forge.SecretDispatch] = "existing-secret"
+	fake.Errors["ForceCommitFileToBranch"] = fmt.Errorf("denied")
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	err := provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	require.Error(t, err)
+	assert.Contains(t, buf.String(), "[group/project] Could not seed poll-state branches")
+}
+
+func TestProvisionGitLabPollState_ReusesExistingSecret(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.VariableValues["group/project/"+forge.SecretDispatch] = "existing-secret"
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	err := provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	require.NoError(t, err)
+	assert.Empty(t, fake.CreatedSecrets, "must reuse the existing dispatch secret")
+	_, err = fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchSlash)
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "[group/project] Seeded poll-state branches")
 }
