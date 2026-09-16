@@ -65,14 +65,14 @@ func newReposMigrateCmd() *cobra.Command {
 For each repo enrolled in the org's per-org config (.fullsend config repo):
   1. Check inference WIF status; provision if needed
   2. Install per-repo (scaffold, variables, secrets) with config carried over
-  3. Unenroll from per-org config
+  3. Remove the repository entry from per-org config
 
 Generates a repos.yaml manifest reflecting the migrated state.
 
 Re-running after a partial migration picks up where it left off:
   - Already per-repo installed → skipped
   - Inference already provisioned → reuse existing WIF provider
-  - Already unenrolled → no-op
+  - Already removed from per-org config → no-op
 
 Individual repo failures do not abort the batch.
 
