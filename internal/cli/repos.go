@@ -913,7 +913,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	// converged repos already have working bot tokens and schedules.
 	// Running on converged repos would revoke live bot PATs, breaking
 	// in-flight pipelines.
-	var postInstallFailed int
+	var installedPostFail int
 	if !opts.dryRun && len(installed) > 0 {
 		for _, r := range installed {
 			rc, ok := manifest.ResolveConfigWithGlobs(r.Owner, r.Repo)
@@ -927,20 +927,20 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			fc, fcErr := clients.ConfigFor(repos.ForgeGitLab)
 			if fcErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s] Could not get GitLab client: %v", repoFullName, fcErr))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 			glClient, ok := fc.Client.(*gl.LiveClient)
 			if !ok {
 				printer.StepWarn(fmt.Sprintf("[%s] GitLab client type assertion failed — bot token setup skipped", repoFullName))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 
 			_, botErr := setupGitLabBotToken(ctx, fc.Client, glClient, printer, r.Owner, r.Repo, opts.gitlabBotToken)
 			if botErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s] Bot token setup failed: %v", repoFullName, botErr))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 
@@ -966,6 +966,8 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	// any legacy CI/CD variables migrated into signed documents. This
 	// runs with the operator's Maintainer-level client and never
 	// touches the bot PAT, so it is safe on live repos.
+	var pollStateFail int
+	var pollStateFailedRepos []repos.ConvergeResult
 	if !opts.dryRun {
 		existing := make([]repos.ConvergeResult, 0, len(converged)+len(alreadyCurrent))
 		existing = append(existing, converged...)
@@ -978,20 +980,27 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			fc, fcErr := clients.ConfigFor(repos.ForgeGitLab)
 			if fcErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s/%s] Could not get GitLab client for poll-state provisioning: %v", r.Owner, r.Repo, fcErr))
-				postInstallFailed++
+				pollStateFail++
+				r.Error = fcErr
+				pollStateFailedRepos = append(pollStateFailedRepos, r)
 				continue
 			}
 			if err := provisionGitLabPollState(ctx, fc.Client, printer, r.Owner, r.Repo); err != nil {
-				postInstallFailed++
+				pollStateFail++
+				r.Error = err
+				pollStateFailedRepos = append(pollStateFailedRepos, r)
 			}
 		}
 	}
 
 	printer.Blank()
-	installedCount := len(installed) - postInstallFailed
-	failedCount := len(failed) + postInstallFailed
+	installedCount := len(installed) - installedPostFail
+	failedCount := len(failed) + installedPostFail + pollStateFail
 
 	for _, r := range failed {
+		printer.StepInfo(fmt.Sprintf("  FAILED: %s/%s — %v", r.Owner, r.Repo, r.Error))
+	}
+	for _, r := range pollStateFailedRepos {
 		printer.StepInfo(fmt.Sprintf("  FAILED: %s/%s — %v", r.Owner, r.Repo, r.Error))
 	}
 
