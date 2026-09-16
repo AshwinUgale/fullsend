@@ -1097,6 +1097,24 @@ func convergeGitLabRootCIFiles(ctx context.Context,
 		return nil, actions
 	}
 	if stagesChanged {
+		// StripObsoleteGitLabStages only scanned the root file. Before
+		// trusting its verdict, confirm the on-repo pipeline wrapper it
+		// gated on doesn't itself still pull in the obsolete native-dispatch
+		// job — see gitlabPipelineWrapperStillIncludesDispatch.
+		pullsInDispatch, wrapperErr := gitlabPipelineWrapperStillIncludesDispatch(ctx, client, owner, repo)
+		if wrapperErr != nil {
+			actions = append(actions, ComponentAction{
+				Component: "gitlab-ci-stages",
+				Action:    "error",
+				Detail:    fmt.Sprintf("error checking %s for obsolete dispatch include: %v", fullsendPipelineInclude, wrapperErr),
+			})
+			return nil, actions
+		}
+		if pullsInDispatch {
+			stagesChanged = false
+		}
+	}
+	if stagesChanged {
 		content = stripped
 		changed = true
 		if cfg.DryRun {

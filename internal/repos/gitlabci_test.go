@@ -1,9 +1,12 @@
 package repos
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1953,4 +1956,216 @@ weird$job:
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.NotEqual(t, existing, result)
+}
+
+func TestStripObsoleteGitLabStages_InterpolatedTopLevelMappingIncludePreserved(t *testing.T) {
+	// A second top-level key whose literal text carries interpolation
+	// syntax (`$[[ inputs.extra ]]:`) can't be trusted as an ordinary job
+	// name: classifyTopLevelKeys must treat it as unclassifiable so the
+	// whole scan fails closed, rather than let stageReferencedByJob's scan
+	// loop treat its mapping value ({local: customer/other.yml} — itself
+	// shaped like a second include) as an ordinary job body with no
+	// stage:, which would leave hasOtherInclude false and jobs from that
+	// include unvisited.
+	existing := []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-pipeline.yml'
+
+stages:
+  - build
+  - dispatch
+  - poll
+  - agent
+
+$[[ inputs.extra ]]:
+  local: customer/other.yml
+`)
+	result, changed, err := StripObsoleteGitLabStages(existing)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, existing, result)
+}
+
+func TestStripObsoleteGitLabStages_InterpolatedIncludeMappingKeyPreserved(t *testing.T) {
+	// An include-mapping item can carry a second, interpolated key
+	// alongside a legitimate "local: fullsend-pipeline.yml" — e.g.
+	// `$[[ inputs.k ]]: customer/other.yml`. isFullsendPipelineInclude
+	// must not silently skip that key via "name != local": since it isn't
+	// a known-safe include-mapping key (and separately carries
+	// interpolation syntax), the item can't be confirmed as solely the
+	// fullsend include.
+	existing := []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-pipeline.yml'
+    $[[ inputs.k ]]: customer/other.yml
+
+stages:
+  - build
+  - dispatch
+  - poll
+  - agent
+`)
+	result, changed, err := StripObsoleteGitLabStages(existing)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, existing, result)
+}
+
+func TestStripObsoleteGitLabStages_InterpolatedMergeKeyInjectedJobPreserved(t *testing.T) {
+	// A top-level key whose name is itself interpolated
+	// (`$[[ inputs.merge ]]: *jobs`) can alias to a mapping of further job
+	// definitions, effectively injecting jobs the way a merge key would.
+	// classifyTopLevelKeys must fail the whole scan closed on this key
+	// rather than let it be scanned as a single ordinary job body (which
+	// has no stage: of its own), silently missing the injected
+	// "notify: {stage: dispatch}" job.
+	existing := []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-pipeline.yml'
+
+stages:
+  - build
+  - dispatch
+  - poll
+  - agent
+
+.jobs: &jobs
+  notify:
+    stage: dispatch
+    script: echo hi
+
+$[[ inputs.merge ]]: *jobs
+`)
+	result, changed, err := StripObsoleteGitLabStages(existing)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, existing, result)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_NotFound(t *testing.T) {
+	// No wrapper file on the repo at all — nothing to pull in the
+	// obsolete dispatch include.
+	fc := forge.NewFakeClient()
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_ScalarInclude(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte(`---
+include: '.gitlab/ci/fullsend-dispatch.yml'
+`)
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_MappingInclude(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-dispatch.yml'
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - local: '.gitlab/ci/fullsend-poll.yml'
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "schedule"
+`)
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_NoDispatch(t *testing.T) {
+	// The current wrapper template: no dispatch include anywhere.
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-poll.yml'
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "schedule"
+  - local: '.gitlab/ci/fullsend-agent.yml'
+    rules:
+      - if: $CI_PIPELINE_SOURCE == "api" && $STAGE
+
+stages:
+  - poll
+  - agent
+`)
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_NoIncludeKey(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte(`---
+stages:
+  - poll
+`)
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_EmptyContent(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("   \n")
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_FetchErrorFailsClosed(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.GetFileContentErrors = map[string]error{
+		"acme/api/" + fullsendPipelineInclude: errors.New("transient API error"),
+	}
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.Error(t, err)
+	assert.True(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_ParseErrorFailsClosed(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("not: valid: yaml: [[")
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.Error(t, err)
+	assert.True(t, got)
+}
+
+func TestGitlabPipelineWrapperStillIncludesDispatch_NonMappingRootFailsClosed(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/"+fullsendPipelineInclude] = []byte("- just a list\n")
+	got, err := gitlabPipelineWrapperStillIncludesDispatch(context.Background(), fc, "acme", "api")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+func TestStripObsoleteGitLabStages_ExtendsTargetAbsentFromRootPreserved(t *testing.T) {
+	// A job's extends: can name a template that isn't a top-level key of
+	// this root file at all — e.g. one defined in the included fullsend
+	// pipeline wrapper or another local include. GitLab resolves extends:
+	// against the whole merged pipeline configuration, not just this root
+	// file, so an unresolvable name here must be treated as a live
+	// reference rather than silently skipped as "not found".
+	existing := []byte(`---
+include:
+  - local: '.gitlab/ci/fullsend-pipeline.yml'
+
+stages:
+  - build
+  - dispatch
+  - poll
+  - agent
+
+notify:
+  extends: .missing_template
+  script: echo hi
+`)
+	result, changed, err := StripObsoleteGitLabStages(existing)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, existing, result)
 }
