@@ -425,10 +425,13 @@ func loadBaseChain(
 			// canonicalized so workspace aliases compare consistently.
 			resolvedBaseDir, dirErr := filepath.EvalSymlinks(filepath.Dir(absBasePath))
 			if dirErr != nil {
-				// Keep rejecting unresolved paths outside the workspace before
-				// returning a missing-path error for paths that remain inside it.
+				// The workspace and child paths may use different forms of the same
+				// alias. Reject only when neither form contains the unresolved base.
 				unresolvedRel, unresolvedRelErr := filepath.Rel(unresolvedWorkspace, absBasePath)
-				if unresolvedRelErr != nil || strings.HasPrefix(unresolvedRel, "..") {
+				resolvedRel, resolvedRelErr := filepath.Rel(absWorkspace, absBasePath)
+				unresolvedEscapes := unresolvedRelErr != nil || strings.HasPrefix(unresolvedRel, "..")
+				resolvedEscapes := resolvedRelErr != nil || strings.HasPrefix(resolvedRel, "..")
+				if unresolvedEscapes && resolvedEscapes {
 					return nil, nil, fmt.Errorf("base path %q escapes workspace root", baseRef)
 				}
 				return nil, nil, fmt.Errorf("resolving base path symlinks: %w", dirErr)
