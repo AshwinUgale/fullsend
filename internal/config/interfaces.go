@@ -113,6 +113,7 @@ type OrgConfigWriter interface {
 	SetInference(InferenceConfig)
 	SetDefaultRuntime(string)
 	SetRepo(name string, rc RepoConfig)
+	DeleteRepo(name string)
 }
 
 // PerRepoConfigWriter extends PerRepoConfigReader and ConfigWriter with
@@ -218,6 +219,15 @@ func (c *orgConfig) SetRepo(name string, rc RepoConfig) {
 		c.Repos = make(map[string]RepoConfig)
 	}
 	c.Repos[name] = rc
+}
+
+// DeleteRepo removes a per-repo configuration entry if it exists.
+// It is a no-op when the name is absent or Repos is nil.
+func (c *orgConfig) DeleteRepo(name string) {
+	if c.Repos == nil {
+		return
+	}
+	delete(c.Repos, name)
 }
 
 // --- perRepoConfig getter methods ---
