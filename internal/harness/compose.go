@@ -451,9 +451,9 @@ func loadBaseChain(
 		}
 		visited[resolvedBasePath] = true
 
-		base, err = LoadRaw(basePath)
+		base, err = LoadRaw(resolvedBasePath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("loading base harness %s: %w", basePath, err)
+			return nil, nil, fmt.Errorf("loading base harness %s: %w", resolvedBasePath, err)
 		}
 
 		baseDir = filepath.Dir(absBasePath)

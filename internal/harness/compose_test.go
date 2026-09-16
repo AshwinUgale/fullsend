@@ -653,6 +653,29 @@ role: test
 	assert.Contains(t, err.Error(), "escapes workspace root via symlink")
 }
 
+func TestLoadWithBase_LocalBase_AbsoluteSymlinkTraversalRejected(t *testing.T) {
+	workspace := t.TempDir()
+	outsideParent := t.TempDir()
+	outsideDir := filepath.Join(outsideParent, "target")
+	require.NoError(t, os.Mkdir(outsideDir, 0755))
+	linkedDir := filepath.Join(workspace, "linked")
+	require.NoError(t, os.Symlink(outsideDir, linkedDir))
+	writeTestHarness(t, outsideParent, "outside.yaml", `
+agent: agents/outside.md
+role: test
+`)
+
+	absoluteBase := linkedDir + string(filepath.Separator) + ".." + string(filepath.Separator) + "outside.yaml"
+	path := writeTestHarness(t, workspace, "child.yaml", fmt.Sprintf(`
+base: %s
+agent: agents/child.md
+role: test
+`, absoluteBase))
+
+	_, _, err := LoadWithBase(context.Background(), path, ComposeOpts{WorkspaceRoot: workspace})
+	require.Error(t, err)
+}
+
 func TestLoadWithBase_LocalBase_SymlinkKeepsReferencingDirectory(t *testing.T) {
 	workspace := t.TempDir()
 	harnessDir := filepath.Join(workspace, "harness")
