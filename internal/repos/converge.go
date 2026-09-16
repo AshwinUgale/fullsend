@@ -625,11 +625,12 @@ func convergeRepo(ctx context.Context,
 	}
 	allScaffoldFiles = append(allScaffoldFiles, refFiles...)
 
-	// 2d-i: Migrate obsolete GitLab root .gitlab-ci.yml workflow rules
-	// (e.g. the merge_request_event rule removed in #7322). This is
-	// independent of ref drift — it must run even when the workflow ref
-	// is already current, since the root file is only otherwise touched
-	// by the install (fresh install) and uninstall (teardown) paths.
+	// 2d-i: Migrate obsolete GitLab root .gitlab-ci.yml entries
+	// (workflow rules from #7322, the empty dispatch stage from #7337).
+	// This is independent of ref drift — it must run even when the
+	// workflow ref is already current, since the root file is only
+	// otherwise touched by the install (fresh install) and uninstall
+	// (teardown) paths.
 	rootCIFiles, rootCIActions := convergeGitLabRootCIFiles(ctx, resolved, cfg, progress)
 	cr.Actions = append(cr.Actions, rootCIActions...)
 
@@ -1012,19 +1013,21 @@ func convergeSchedules(ctx context.Context,
 }
 
 // convergeGitLabRootCIFiles migrates already-enrolled GitLab repos whose
-// root .gitlab-ci.yml still carries workflow:rules entries that fullsend
-// no longer requires (e.g. the native merge_request_event dispatch rule
-// removed in #7322). The root file is user-owned and is otherwise only
-// touched by the install merge path (fresh installs) and the uninstall
-// unmerge path (teardown) — neither runs during upgrade/converge, so
-// without this step an obsolete rule would survive convergence forever
-// and GitLab would keep creating empty/config-error pipelines for every
-// MR event. StripObsoleteGitLabWorkflowRules only rewrites the file when
-// it can prove fullsend owns the workflow block (see
+// root .gitlab-ci.yml still carries entries that fullsend no longer
+// requires: obsolete workflow:rules (the native merge_request_event
+// dispatch rule removed in #7322) and obsolete stages (the empty
+// "dispatch" stage removed in #7337). The root file is user-owned and
+// is otherwise only touched by the install merge path (fresh installs)
+// and the uninstall unmerge path (teardown) — neither runs during
+// upgrade/converge, so without this step an obsolete entry would survive
+// convergence forever. StripObsoleteGitLabWorkflowRules only rewrites
+// the file when it can prove fullsend owns the workflow block (see
 // gitlabCIWorkflowIsFullsendOwned), so merge-path enrollments without
 // the fullsend workflow.name are intentionally left for manual cleanup
-// rather than risking a user's own MR gate. It does not commit — the
-// caller batches all scaffold file changes into a single atomic commit.
+// rather than risking a user's own MR gate. StripObsoleteGitLabStages
+// gates on the fullsend pipeline include plus a current fullsend stage
+// (see that function's doc comment). It does not commit — the caller
+// batches all scaffold file changes into a single atomic commit.
 func convergeGitLabRootCIFiles(ctx context.Context,
 	resolved ResolvedConfig,
 	cfg ConvergeConfig,
@@ -1052,7 +1055,10 @@ func convergeGitLabRootCIFiles(ctx context.Context,
 		return nil, actions
 	}
 
-	stripped, changed, stripErr := StripObsoleteGitLabWorkflowRules(existing)
+	content := existing
+	changed := false
+
+	stripped, rulesChanged, stripErr := StripObsoleteGitLabWorkflowRules(content)
 	if stripErr != nil {
 		actions = append(actions, ComponentAction{
 			Component: "gitlab-ci-rules",
@@ -1061,30 +1067,65 @@ func convergeGitLabRootCIFiles(ctx context.Context,
 		})
 		return nil, actions
 	}
+	if rulesChanged {
+		content = stripped
+		changed = true
+		if cfg.DryRun {
+			actions = append(actions, ComponentAction{
+				Component: "gitlab-ci-rules",
+				Action:    "update",
+				Detail:    "would remove obsolete merge_request_event workflow rule from .gitlab-ci.yml",
+			})
+			progress(repoFullName, "dry-run", "Would remove obsolete merge_request_event workflow rule from .gitlab-ci.yml")
+		} else {
+			actions = append(actions, ComponentAction{
+				Component: "gitlab-ci-rules",
+				Action:    "update",
+				Detail:    "removed obsolete merge_request_event workflow rule from .gitlab-ci.yml",
+			})
+			progress(repoFullName, "repair", "Removing obsolete merge_request_event workflow rule from .gitlab-ci.yml")
+		}
+	}
+
+	stripped, stagesChanged, stripErr := StripObsoleteGitLabStages(content)
+	if stripErr != nil {
+		actions = append(actions, ComponentAction{
+			Component: "gitlab-ci-stages",
+			Action:    "error",
+			Detail:    fmt.Sprintf("error checking .gitlab-ci.yml for obsolete stages: %v", stripErr),
+		})
+		return nil, actions
+	}
+	if stagesChanged {
+		content = stripped
+		changed = true
+		if cfg.DryRun {
+			actions = append(actions, ComponentAction{
+				Component: "gitlab-ci-stages",
+				Action:    "update",
+				Detail:    "would remove obsolete dispatch stage from .gitlab-ci.yml",
+			})
+			progress(repoFullName, "dry-run", "Would remove obsolete dispatch stage from .gitlab-ci.yml")
+		} else {
+			actions = append(actions, ComponentAction{
+				Component: "gitlab-ci-stages",
+				Action:    "update",
+				Detail:    "removed obsolete dispatch stage from .gitlab-ci.yml",
+			})
+			progress(repoFullName, "repair", "Removing obsolete dispatch stage from .gitlab-ci.yml")
+		}
+	}
+
 	if !changed {
 		return nil, actions
 	}
-
 	if cfg.DryRun {
-		actions = append(actions, ComponentAction{
-			Component: "gitlab-ci-rules",
-			Action:    "update",
-			Detail:    "would remove obsolete merge_request_event workflow rule from .gitlab-ci.yml",
-		})
-		progress(repoFullName, "dry-run", "Would remove obsolete merge_request_event workflow rule from .gitlab-ci.yml")
 		return nil, actions
 	}
 
-	actions = append(actions, ComponentAction{
-		Component: "gitlab-ci-rules",
-		Action:    "update",
-		Detail:    "removed obsolete merge_request_event workflow rule from .gitlab-ci.yml",
-	})
-	progress(repoFullName, "repair", "Removing obsolete merge_request_event workflow rule from .gitlab-ci.yml")
-
 	return []forge.TreeFile{{
 		Path:    ".gitlab-ci.yml",
-		Content: stripped,
+		Content: content,
 		Mode:    "100644",
 	}}, actions
 }

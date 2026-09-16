@@ -516,7 +516,7 @@ func TestGitLabPipelineWrapperContent(t *testing.T) {
 	assert.Contains(t, s, "fullsend-poll.yml")
 	assert.Contains(t, s, "fullsend-agent.yml")
 	assert.Contains(t, s, "stages:")
-	assert.Contains(t, s, "- dispatch")
+	assert.NotContains(t, s, "- dispatch", "dispatch stage was removed in #7337")
 	assert.Contains(t, s, "- poll")
 	assert.Contains(t, s, "- agent")
 	assert.NotContains(t, s, "- generate")

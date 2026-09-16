@@ -165,7 +165,10 @@ Accepted
 > strips this specific obsolete rule from the root file in place
 > (`StripObsoleteGitLabWorkflowRules`, `internal/repos/gitlabci.go`),
 > leaving fullsend's current rules and all user configuration
-> untouched. See risk item 6 under Consequences.
+> untouched. See risk item 6 under Consequences. #7337 subsequently
+> dropped the leftover empty `dispatch` stage from the required stage
+> list and strips it from already-enrolled root files on converge
+> (`StripObsoleteGitLabStages`).
 
 ## Context
 

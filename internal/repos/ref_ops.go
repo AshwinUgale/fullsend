@@ -81,11 +81,13 @@ func collectGitLabUpgradeTemplates(runnerTags []string, targetRef string) ([]for
 	for _, f := range installFiles {
 		// Skip the dispatch file — upgrade handles it via replaceShimRef.
 		// The pipeline wrapper is included so structural changes (e.g.
-		// removing the native MR-dispatch include in #7322) reach
-		// enrolled repos. The root .gitlab-ci.yml is user-owned and is
-		// not synced here; structural changes to it (like #7322's rule
+		// removing the native MR-dispatch include in #7322, dropping the
+		// empty dispatch stage in #7337) reach enrolled repos. The root
+		// .gitlab-ci.yml is user-owned and is not synced here; structural
+		// changes to it (like #7322's rule removal or #7337's stage
 		// removal) need an explicit converge-time migration — see
-		// convergeGitLabRootCIFiles / StripObsoleteGitLabWorkflowRules.
+		// convergeGitLabRootCIFiles / StripObsoleteGitLabWorkflowRules
+		// / StripObsoleteGitLabStages.
 		if f.Path == ".gitlab/ci/fullsend-dispatch.yml" {
 			continue
 		}
