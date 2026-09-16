@@ -60,7 +60,12 @@ exit 78
 
 The stdout-derived reason is sanitized before use: control characters
 (`U+0000`–`U+001F`, `U+007F`) are stripped — matching the file-based
-value validation — and the result is capped at 1024 bytes.
+value validation — and the result is capped at 1024 bytes. It is also run
+through the same credential-redaction pass used for [hard-failure
+diagnostics](#hard-failure-diagnostics) (literal runner-env values plus the
+shared secret-pattern scanner), since it is derived from incidental stdout
+rather than a value the script author chose to put in a `reason=` line. A
+file-based `reason=` value is not redacted.
 
 ### Hard-failure diagnostics
 
