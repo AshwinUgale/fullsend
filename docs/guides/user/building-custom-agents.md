@@ -543,6 +543,13 @@ jobs:
           path: ${{ github.workspace }}/output
 ```
 
+This example reflects the currently deployed cancellation policy. Under
+[ADR 0106](../../ADRs/0106-serialize-agent-runs-and-coalesce-subsequent-events.md),
+the platform will change subject-scoped agent workflows to
+`cancel-in-progress: false` once preserve-and-coalesce scheduling is
+implemented. Until that migration lands, keep the setting aligned with the
+reusable workflow that invokes the agent.
+
 ### Critical workflow steps
 
 1. **Checkout target repo** — `fullsend run` requires `--target-repo` pointing to a separate checkout of the repository the agent will work on. Without this, fullsend may overwrite output files.
