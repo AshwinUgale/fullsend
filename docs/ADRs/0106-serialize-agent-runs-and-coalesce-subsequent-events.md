@@ -73,11 +73,18 @@ next agent run reconciles all current concerns on the subject.
 Adopt preserve-and-coalesce scheduling for automatic agent triggers. Every event
 still follows the normal input-driver normalization, authorization, harness
 selection, and CEL trigger path. A matching run enters a platform serialization
-scope keyed by harness identity, normalized `repo`, `entity.kind`, and
-`entity.id`. Event-backed and scheduled-discovery runs for the same resolved
-entity use that scope; the key never depends on an event-only field. An event
-that fails authorization or does not match the harness trigger creates no
-pending run.
+scope keyed by harness identity, normalized target `repo`, and a canonical
+subject identity. The subject identity consists of the resolved entity's
+`entity.source.system`, canonical kind, and canonical ID. A `work_item` with
+`entity.linked_change_proposal` uses `change_proposal` and the linked change
+proposal's ID, so a comment on a GitHub pull request shares a scope with that
+pull request's review and lifecycle events. Other work items use their own kind
+and ID, and conversations remain a distinct kind. Consequently, equal numeric
+IDs from GitHub and Jira cannot share a scope. Event-backed and
+scheduled-discovery runs for the same resolved entity use the same subject
+identity; the key never depends on an event-only field such as
+`event.source.system`. An event that fails authorization or does not match the
+harness trigger creates no pending run.
 
 The execution platform MUST allow the active run to finish and coalesce later
 matching events into one pending run representing the newest retained event.
