@@ -356,14 +356,26 @@ Secrets and variables are deployed at different scopes depending on the installa
 
 **Target repo CI/CD variables (protected):**
 - `FULLSEND_FORGE_TOKEN` — Project access token for bot identity (stored as protected CI/CD variable)
-- `FULLSEND_LAST_POLL_AT_FAST` — Timestamp of last slash poll run (name predates the slash/events terminology split; used by the slash-command schedule)
-- `FULLSEND_LAST_POLL_AT_FULL` — Timestamp of last event poll run (name predates the slash/events terminology split; used by the event-discovery schedule)
 - `FULLSEND_POLL_MODE` — Pipeline schedule variable (`"slash"` or `"events"`); set automatically per schedule during install, not a project-level CI/CD variable
-- `FULLSEND_LABEL_STATE` — JSON object tracking label sync state
-- `FULLSEND_DISPATCHED_KEYS_FAST` — JSON map of recently dispatched event keys (slash-command schedule)
-- `FULLSEND_DISPATCHED_KEYS_FULL` — JSON map of recently dispatched event keys (event-discovery schedule)
-- `FULLSEND_FAILED_KEYS_FAST` — JSON map of event keys to failure counts (slash-command schedule)
-- `FULLSEND_FAILED_KEYS_FULL` — JSON map of event keys to failure counts (event-discovery schedule)
+
+**Legacy, install-provisioned CI/CD variables (#7343 phase 2):** the
+following seven variables may still be provisioned by install for
+older repos, but the poller no longer reads or writes any of them via
+`GetCIVariable`/`UpdateCIVariable`. Poll state (watermarks, label sync
+state, dispatched/failed-key dedup) now lives in a single HMAC-signed
+`state.json` document per poll mode, committed to two dedicated,
+unprotected branches (`fullsend-poll-state-slash` and
+`fullsend-poll-state-events`) rather than CI/CD variables. The
+signature reuses `FULLSEND_DISPATCH_SECRET` with per-branch,
+per-project domain separation, so the poller can run at Developer
+access instead of Maintainer. See ADR 0067.
+- `FULLSEND_LAST_POLL_AT_FAST` — Legacy; superseded by `last_poll_at_fast` in `state.json` on `fullsend-poll-state-slash`
+- `FULLSEND_LAST_POLL_AT_FULL` — Legacy; superseded by `last_poll_at_full` in `state.json` on `fullsend-poll-state-events`
+- `FULLSEND_LABEL_STATE` — Legacy; superseded by `label_state` in `state.json` on `fullsend-poll-state-events`
+- `FULLSEND_DISPATCHED_KEYS_FAST` — Legacy; superseded by `dispatched_keys_fast` in `state.json` on `fullsend-poll-state-slash`
+- `FULLSEND_DISPATCHED_KEYS_FULL` — Legacy; superseded by `dispatched_keys_full` in `state.json` on `fullsend-poll-state-events`
+- `FULLSEND_FAILED_KEYS_FAST` — Legacy; superseded by `failed_keys_fast` in `state.json` on `fullsend-poll-state-slash`
+- `FULLSEND_FAILED_KEYS_FULL` — Legacy; superseded by `failed_keys_full` in `state.json` on `fullsend-poll-state-events`
 
 **Inference variables (required when inference is configured):**
 - `FULLSEND_GCP_PROJECT_ID` — GCP project ID for inference (stored as a CI/CD secret, protected + masked)
