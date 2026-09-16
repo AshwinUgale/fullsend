@@ -22,10 +22,8 @@ include:
       - if: $CI_PIPELINE_SOURCE == "api" && $STAGE
 
 stages:
-  # 'dispatch' is a retained no-op stage: native MR dispatch was removed in
-  # #7322 and no job uses it anymore, but it stays in the list (and in
-  # fullsendStages) so uninstall/drift detection continues to recognize and
-  # clean it up on already-enrolled repos. GitLab silently skips empty stages.
-  - dispatch
+  # Native MR dispatch was removed in #7322. The empty 'dispatch' stage
+  # was dropped from this list in #7337; uninstall and converge still
+  # strip it from already-enrolled repos via obsoleteGitLabStages.
   - poll
   - agent
