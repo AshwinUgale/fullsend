@@ -201,6 +201,13 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 	for _, s := range requiredSecretsForForge(cfg.Forge) {
 		managedNames[s] = true
 	}
+	// FULLSEND_DISPATCH_SECRET is auto-provisioned by install/converge
+	// to sign poll state. It is managed, not an orphan, but is
+	// intentionally not in requiredSecretsForForge — that would mark
+	// existing installs incomplete solely because the secret is new.
+	if cfg.Forge == ForgeGitLab {
+		managedNames[forge.SecretDispatch] = true
+	}
 
 	forgeVars, err := client.ListRepoVariables(ctx, owner, repo)
 	if err != nil {

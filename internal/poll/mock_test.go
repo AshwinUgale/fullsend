@@ -148,16 +148,6 @@ func (m *mockClient) ListResourceLabelEvents(_ context.Context, _, _ string, iss
 // fails closed on unsigned state.
 const testDispatchSecret = "test-secret"
 
-// hmacDomainForBranch mirrors (*Poller).hmacDomain: the domain is the
-// per-branch prefix bound to the querying project (owner/repo).
-func hmacDomainForBranch(branch, projectPath string) string {
-	base := hmacDomainEvents
-	if branch == PollStateBranchSlash {
-		base = hmacDomainSlash
-	}
-	return base + projectPath + "\n"
-}
-
 func (m *mockClient) putBranchFile(branch, path string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -266,7 +256,7 @@ func (m *mockClient) GetFileContentAtRef(_ context.Context, owner, repo, path, r
 	if path == PollStateFileName {
 		if files, ok := m.files[ref]; !ok || files[path] == nil {
 			if s, ok := m.pendingSign[ref]; ok {
-				domain := hmacDomainForBranch(ref, owner+"/"+repo)
+				domain := hmacDomainFor(ref, owner+"/"+repo)
 				sig, err := computeStateHMAC(testDispatchSecret, domain, s)
 				if err != nil {
 					return nil, err

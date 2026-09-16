@@ -8,6 +8,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/forge/gitlab"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/repos"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
@@ -76,7 +77,35 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 		printer.StepDone("Bot credentials stored as protected CI/CD variable")
 	}
 
+	provisionGitLabPollState(ctx, client, printer, owner, repo)
+
 	return botPAT, nil
+}
+
+// provisionGitLabPollState ensures FULLSEND_DISPATCH_SECRET exists so
+// poll-state HMAC signing is on by default, then creates both poll-state
+// branches with an initial signed document. Legacy CI/CD variables are
+// folded in when present (*Fast → slash, *Full + LabelState → events);
+// otherwise each branch is seeded with an empty signed baseline.
+//
+// Safe to run on both fresh installs and already-enrolled (converged /
+// already-current) repos: it never creates or revokes the bot PAT, so
+// it does not disturb live pipelines. Best-effort — failures warn rather
+// than fail the operation, matching the other GitLab setup steps.
+func provisionGitLabPollState(ctx context.Context, client forge.Client, printer *ui.Printer, owner, repo string) {
+	dispatchSecret, created, secretErr := poll.EnsureDispatchSecret(ctx, client, owner, repo)
+	if secretErr != nil {
+		printer.StepWarn(fmt.Sprintf("Could not provision dispatch secret: %v", secretErr))
+		return
+	}
+	if created {
+		printer.StepDone("Provisioned FULLSEND_DISPATCH_SECRET (protected, masked)")
+	}
+	if seeded, seedErr := poll.SeedGitLabPollStateBranches(ctx, client, owner, repo, dispatchSecret); seedErr != nil {
+		printer.StepWarn(fmt.Sprintf("Could not seed poll-state branches: %v", seedErr))
+	} else if seeded {
+		printer.StepDone("Seeded poll-state branches from legacy vars (or empty baseline)")
+	}
 }
 
 // setupGitLabPipelineSchedules creates two independent pipeline schedules

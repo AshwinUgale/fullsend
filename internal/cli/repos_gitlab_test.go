@@ -15,6 +15,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/forge/gitlab"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/ui"
 )
 
@@ -43,8 +44,11 @@ func TestSetupGitLabBotToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "glpat-test-token", token)
 
-		require.Len(t, fake.CreatedSecrets, 1)
+		// Bot PAT plus an auto-provisioned FULLSEND_DISPATCH_SECRET.
+		require.Len(t, fake.CreatedSecrets, 2)
 		assert.Equal(t, forge.SecretForgeToken, fake.CreatedSecrets[0].Name)
+		assert.Equal(t, forge.SecretDispatch, fake.CreatedSecrets[1].Name)
+		assert.NotEmpty(t, fake.CreatedSecrets[1].Value)
 	})
 
 	t.Run("falls back to provided token on API failure", func(t *testing.T) {
@@ -66,8 +70,9 @@ func TestSetupGitLabBotToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "glpat-fallback", token)
 
-		require.Len(t, fake.CreatedSecrets, 1)
+		require.Len(t, fake.CreatedSecrets, 2)
 		assert.Equal(t, forge.SecretForgeToken, fake.CreatedSecrets[0].Name)
+		assert.Equal(t, forge.SecretDispatch, fake.CreatedSecrets[1].Name)
 	})
 
 	t.Run("errors when API fails and no fallback token", func(t *testing.T) {
@@ -228,8 +233,9 @@ func TestSetupGitLabBotToken_NilClient_FallbackToken(t *testing.T) {
 	token, err := setupGitLabBotToken(ctx, fake, nil, printer, "group", "project", "glpat-manual")
 	require.NoError(t, err)
 	assert.Equal(t, "glpat-manual", token)
-	require.Len(t, fake.CreatedSecrets, 1)
+	require.Len(t, fake.CreatedSecrets, 2)
 	assert.Equal(t, forge.SecretForgeToken, fake.CreatedSecrets[0].Name)
+	assert.Equal(t, forge.SecretDispatch, fake.CreatedSecrets[1].Name)
 }
 
 func TestSetupGitLabBotToken_NilClient_NoFallback(t *testing.T) {
@@ -524,4 +530,115 @@ func TestCleanupGitLabBotToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, buf.String(), "Could not list project access tokens")
 	})
+}
+
+func gitlabBotTokenServer(t *testing.T) *gitlab.LiveClient {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": 1, "name": "fullsend-bot", "token": "glpat-test-token", "active": true,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	glClient, err := gitlab.New("test-token", gitlab.WithBaseURL(srv.URL))
+	require.NoError(t, err)
+	return glClient
+}
+
+func TestSetupGitLabBotToken_MigratesLegacyPollState(t *testing.T) {
+	ctx := context.Background()
+	glClient := gitlabBotTokenServer(t)
+
+	fake := forge.NewFakeClient()
+	fake.VariableValues["group/project/"+forge.VarLastPollAtFast] = "2026-01-01T00:00:00Z"
+	fake.VariableValues["group/project/"+forge.VarLastPollAtFull] = "2026-01-02T00:00:00Z"
+	fake.VariableValues["group/project/"+forge.VarLabelState] = `{"1":["bug"]}`
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	token, err := setupGitLabBotToken(ctx, fake, glClient, printer, "group", "project", "")
+	require.NoError(t, err)
+	assert.Equal(t, "glpat-test-token", token)
+
+	slash, err := fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchSlash)
+	require.NoError(t, err, "slash poll-state branch should have been seeded")
+	var slashState struct {
+		LastPollAtFast string `json:"last_poll_at_fast"`
+		HMAC           string `json:"hmac"`
+	}
+	require.NoError(t, json.Unmarshal(slash, &slashState))
+	assert.Equal(t, "2026-01-01T00:00:00Z", slashState.LastPollAtFast)
+	assert.NotEmpty(t, slashState.HMAC)
+
+	events, err := fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchEvents)
+	require.NoError(t, err, "events poll-state branch should have been seeded")
+	var eventsState struct {
+		LastPollAtFull string `json:"last_poll_at_full"`
+		HMAC           string `json:"hmac"`
+	}
+	require.NoError(t, json.Unmarshal(events, &eventsState))
+	assert.Equal(t, "2026-01-02T00:00:00Z", eventsState.LastPollAtFull)
+	assert.NotEmpty(t, eventsState.HMAC)
+	assert.Contains(t, buf.String(), "Seeded poll-state branches")
+}
+
+func TestSetupGitLabBotToken_EmptyBaselineWhenNoLegacyVars(t *testing.T) {
+	ctx := context.Background()
+	glClient := gitlabBotTokenServer(t)
+
+	fake := forge.NewFakeClient()
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	_, err := setupGitLabBotToken(ctx, fake, glClient, printer, "group", "project", "")
+	require.NoError(t, err)
+
+	_, err = fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchSlash)
+	require.NoError(t, err, "greenfield install still seeds an empty signed slash baseline")
+	_, err = fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchEvents)
+	require.NoError(t, err, "greenfield install still seeds an empty signed events baseline")
+	assert.Contains(t, buf.String(), "Seeded poll-state branches")
+}
+
+func TestProvisionGitLabPollState_WarnsOnSecretError(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.Errors["ListRepoVariables"] = fmt.Errorf("forbidden")
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	assert.Contains(t, buf.String(), "Could not provision dispatch secret")
+}
+
+func TestProvisionGitLabPollState_WarnsOnSeedError(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.VariableValues["group/project/"+forge.SecretDispatch] = "existing-secret"
+	fake.Errors["ForceCommitFileToBranch"] = fmt.Errorf("denied")
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	assert.Contains(t, buf.String(), "Could not seed poll-state branches")
+}
+
+func TestProvisionGitLabPollState_ReusesExistingSecret(t *testing.T) {
+	ctx := context.Background()
+	fake := forge.NewFakeClient()
+	fake.VariableValues["group/project/"+forge.SecretDispatch] = "existing-secret"
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	provisionGitLabPollState(ctx, fake, printer, "group", "project")
+
+	assert.Empty(t, fake.CreatedSecrets, "must reuse the existing dispatch secret")
+	_, err := fake.GetFileContentAtRef(ctx, "group", "project", poll.PollStateFileName, poll.PollStateBranchSlash)
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "Seeded poll-state branches")
 }
