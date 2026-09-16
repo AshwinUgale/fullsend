@@ -25,6 +25,7 @@ var gitlabUninstallVars = []string{
 	forge.VarFailedKeysFull,
 	forge.VarLegacyForge,
 	forge.SecretForgeToken,
+	forge.SecretDispatch,
 	forge.VarGCPRegion,
 	forge.VarLabelState,
 	forge.VarLastPollAtFast,

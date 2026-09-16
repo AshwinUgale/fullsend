@@ -960,8 +960,8 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	}
 
 	// GitLab poll-state provisioning for already-enrolled repos.
-	// Fresh installs are handled above via setupGitLabBotToken (and
-	// repos.Install); converged and already-current repos still need
+	// Fresh installs are handled above via repos.Install (Step 5b);
+	// converged and already-current repos still need
 	// FULLSEND_DISPATCH_SECRET and the two poll-state branches, with
 	// any legacy CI/CD variables migrated into signed documents. This
 	// runs with the operator's Maintainer-level client and never
@@ -978,9 +978,12 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			fc, fcErr := clients.ConfigFor(repos.ForgeGitLab)
 			if fcErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s/%s] Could not get GitLab client for poll-state provisioning: %v", r.Owner, r.Repo, fcErr))
+				postInstallFailed++
 				continue
 			}
-			provisionGitLabPollState(ctx, fc.Client, printer, r.Owner, r.Repo)
+			if err := provisionGitLabPollState(ctx, fc.Client, printer, r.Owner, r.Repo); err != nil {
+				postInstallFailed++
+			}
 		}
 	}
 

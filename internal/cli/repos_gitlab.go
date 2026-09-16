@@ -77,8 +77,6 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 		printer.StepDone("Bot credentials stored as protected CI/CD variable")
 	}
 
-	provisionGitLabPollState(ctx, client, printer, owner, repo)
-
 	return botPAT, nil
 }
 
@@ -88,24 +86,32 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 // folded in when present (*Fast → slash, *Full + LabelState → events);
 // otherwise each branch is seeded with an empty signed baseline.
 //
-// Safe to run on both fresh installs and already-enrolled (converged /
-// already-current) repos: it never creates or revokes the bot PAT, so
-// it does not disturb live pipelines. Best-effort — failures warn rather
-// than fail the operation, matching the other GitLab setup steps.
-func provisionGitLabPollState(ctx context.Context, client forge.Client, printer *ui.Printer, owner, repo string) {
+// Only called for already-enrolled (converged / already-current) repos —
+// fresh installs are handled by repos.Install() itself. Safe to run on
+// live repos: it never creates or revokes the bot PAT, so it does not
+// disturb live pipelines. Returns an error if either step fails so the
+// caller can count the repo as failed, matching how fresh installs treat
+// the identical failure as fatal; failures are still logged via StepWarn
+// for operator visibility.
+func provisionGitLabPollState(ctx context.Context, client forge.Client, printer *ui.Printer, owner, repo string) error {
+	repoFullName := owner + "/" + repo
 	dispatchSecret, created, secretErr := poll.EnsureDispatchSecret(ctx, client, owner, repo)
 	if secretErr != nil {
-		printer.StepWarn(fmt.Sprintf("Could not provision dispatch secret: %v", secretErr))
-		return
+		printer.StepWarn(fmt.Sprintf("[%s] Could not provision dispatch secret: %v", repoFullName, secretErr))
+		return secretErr
 	}
 	if created {
-		printer.StepDone("Provisioned FULLSEND_DISPATCH_SECRET (protected, masked)")
+		printer.StepDone(fmt.Sprintf("[%s] Provisioned FULLSEND_DISPATCH_SECRET (protected, masked)", repoFullName))
 	}
-	if seeded, seedErr := poll.SeedGitLabPollStateBranches(ctx, client, owner, repo, dispatchSecret); seedErr != nil {
-		printer.StepWarn(fmt.Sprintf("Could not seed poll-state branches: %v", seedErr))
-	} else if seeded {
-		printer.StepDone("Seeded poll-state branches from legacy vars (or empty baseline)")
+	seeded, seedErr := poll.SeedGitLabPollStateBranches(ctx, client, owner, repo, dispatchSecret)
+	if seedErr != nil {
+		printer.StepWarn(fmt.Sprintf("[%s] Could not seed poll-state branches: %v", repoFullName, seedErr))
+		return seedErr
 	}
+	if seeded {
+		printer.StepDone(fmt.Sprintf("[%s] Seeded poll-state branches from legacy vars (or empty baseline)", repoFullName))
+	}
+	return nil
 }
 
 // setupGitLabPipelineSchedules creates two independent pipeline schedules

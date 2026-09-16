@@ -420,7 +420,7 @@ func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (p
 		found = true
 		var ls LabelState
 		if err := json.Unmarshal([]byte(v), &ls); err != nil {
-			log.Printf("warning: failed to unmarshal legacy label state for %s/%s, skipping: %v", owner, repo, err)
+			log.Printf("WARNING: failed to unmarshal legacy label state for %s/%s, skipping: %v", owner, repo, err)
 		} else {
 			state.LabelState = ls
 		}
@@ -429,7 +429,7 @@ func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (p
 		found = true
 		var m map[string]int64
 		if err := json.Unmarshal([]byte(v), &m); err != nil {
-			log.Printf("warning: failed to unmarshal legacy dispatched keys (fast) for %s/%s, skipping: %v", owner, repo, err)
+			log.Printf("WARNING: failed to unmarshal legacy dispatched keys (fast) for %s/%s, skipping: %v", owner, repo, err)
 		} else {
 			state.DispatchedKeysFast = m
 		}
@@ -438,7 +438,7 @@ func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (p
 		found = true
 		var m map[string]int64
 		if err := json.Unmarshal([]byte(v), &m); err != nil {
-			log.Printf("warning: failed to unmarshal legacy dispatched keys (full) for %s/%s, skipping: %v", owner, repo, err)
+			log.Printf("WARNING: failed to unmarshal legacy dispatched keys (full) for %s/%s, skipping: %v", owner, repo, err)
 		} else {
 			state.DispatchedKeysFull = m
 		}
@@ -447,7 +447,7 @@ func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (p
 		found = true
 		var m map[string]int
 		if err := json.Unmarshal([]byte(v), &m); err != nil {
-			log.Printf("warning: failed to unmarshal legacy failed keys (fast) for %s/%s, skipping: %v", owner, repo, err)
+			log.Printf("WARNING: failed to unmarshal legacy failed keys (fast) for %s/%s, skipping: %v", owner, repo, err)
 		} else {
 			state.FailedKeysFast = m
 		}
@@ -456,7 +456,7 @@ func buildLegacyPollStateFromVars(vars map[string]string, owner, repo string) (p
 		found = true
 		var m map[string]int
 		if err := json.Unmarshal([]byte(v), &m); err != nil {
-			log.Printf("warning: failed to unmarshal legacy failed keys (full) for %s/%s, skipping: %v", owner, repo, err)
+			log.Printf("WARNING: failed to unmarshal legacy failed keys (full) for %s/%s, skipping: %v", owner, repo, err)
 		} else {
 			state.FailedKeysFull = m
 		}
@@ -536,12 +536,12 @@ func SeedGitLabPollStateBranches(ctx context.Context, client forge.Client, owner
 		doc := pollStateForMode(b.slash, legacy)
 		sig, err := computeStateHMAC(dispatchSecret, hmacDomainFor(b.name, projectPath), doc)
 		if err != nil {
-			return seeded, err
+			return seeded, fmt.Errorf("computing poll state HMAC on %s: %w", b.name, err)
 		}
 		doc.HMAC = sig
 		data, err := json.Marshal(doc)
 		if err != nil {
-			return seeded, err
+			return seeded, fmt.Errorf("marshaling poll state on %s: %w", b.name, err)
 		}
 		if err := client.ForceCommitFileToBranch(ctx, owner, repo, b.name, PollStateFileName, "fullsend: seed poll state", data); err != nil {
 			return seeded, fmt.Errorf("seeding poll state on %s: %w", b.name, err)
