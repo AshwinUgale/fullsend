@@ -1506,9 +1506,11 @@ func TestForceCommitFileToBranch(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			assert.Equal(t, "main", r.URL.Query().Get("ref_name"))
-			assert.Equal(t, "committed_date", r.URL.Query().Get("order_by"))
-			assert.Equal(t, "asc", r.URL.Query().Get("sort"))
-			assert.Equal(t, "1", r.URL.Query().Get("per_page"))
+			assert.Equal(t, "true", r.URL.Query().Get("first_parent"))
+			assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+			assert.Equal(t, "1", r.URL.Query().Get("page"))
+			assert.Empty(t, r.URL.Query().Get("order_by"), "order_by is not a valid param on this endpoint")
+			assert.Empty(t, r.URL.Query().Get("sort"), "sort is not a valid param on this endpoint")
 			json.NewEncoder(w).Encode([]map[string]any{
 				{"id": "root-sha-abc"},
 			})
@@ -1579,6 +1581,69 @@ func TestForceCommitFileToBranch_RepeatedWrites(t *testing.T) {
 		assert.Equal(t, "fixed-root", p["start_sha"], "write %d", i)
 		assert.Equal(t, "state-branch", p["branch"], "write %d", i)
 	}
+}
+
+// TestForceCommitFileToBranch_WalksToLastPage asserts the actual root
+// resolution protocol: first-parent history is paginated (not sorted via
+// order_by/sort, which this endpoint does not support) and the root is the
+// *last* entry of the *last* page - not the first entry of the first page,
+// which would just be the default branch's current HEAD.
+func TestForceCommitFileToBranch_WalksToLastPage(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/owner%2Frepo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": 1, "name": "repo", "path_with_namespace": "owner/repo",
+			"default_branch": "main", "visibility": "public",
+		})
+	})
+
+	var commitPayload map[string]any
+	var pagesRequested []string
+	mux.HandleFunc("/api/v4/projects/owner%2Frepo/repository/commits", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			assert.Equal(t, "true", r.URL.Query().Get("first_parent"))
+			assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+			page := r.URL.Query().Get("page")
+			pagesRequested = append(pagesRequested, page)
+			switch page {
+			case "1":
+				// A full page: the branch tip ("head-commit") is first,
+				// far from the true root. If resolution stopped after the
+				// first page (or took its first entry), it would wrongly
+				// pick a non-root commit.
+				commits := make([]map[string]any, 100)
+				commits[0] = map[string]any{"id": "head-commit"}
+				for i := 1; i < 100; i++ {
+					commits[i] = map[string]any{"id": fmt.Sprintf("mid-commit-%d", i)}
+				}
+				w.Header().Set("X-Next-Page", "2")
+				json.NewEncoder(w).Encode(commits)
+			case "2":
+				// Final, partial page: its last entry is the true root.
+				json.NewEncoder(w).Encode([]map[string]any{
+					{"id": "penultimate-commit"},
+					{"id": "true-root-commit"},
+				})
+			default:
+				t.Fatalf("unexpected page %q", page)
+			}
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			require.NoError(t, json.Unmarshal(body, &commitPayload))
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": "new-commit"})
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	})
+
+	err := client.ForceCommitFileToBranch(ctx, "owner", "repo", "state-branch", "state.json", "save poll state", []byte(`{"n":1}`))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1", "2"}, pagesRequested)
+	assert.Equal(t, "true-root-commit", commitPayload["start_sha"])
 }
 
 func TestForceCommitFileToBranch_SkipCIAlreadyPresent(t *testing.T) {

@@ -14,9 +14,10 @@ import (
 )
 
 // maxTreePages is the pagination safety bound for tree-listing endpoints
-// (getTreeMap, ListDirectoryContents, ListRepositoryFiles). Set higher than
-// the entity-listing cap (100 pages) because file trees can have orders of
-// magnitude more entries in monorepos.
+// (getTreeMap, ListDirectoryContents, ListRepositoryFiles) and for walking
+// first-parent commit history (resolveRootCommitSHA). Set higher than the
+// entity-listing cap (100 pages) because file trees and commit histories can
+// have orders of magnitude more entries in monorepos.
 const maxTreePages = 1000
 
 type treeEntry struct {
@@ -820,33 +821,55 @@ func (c *LiveClient) ForceCommitFileToBranch(ctx context.Context, owner, repo, b
 	return nil
 }
 
+// resolveRootCommitSHA finds the repository's DAG root commit (the fixed
+// base for force-re-root writes). The commits-list endpoint does not
+// support order_by/sort (those belong to other GitLab endpoints); it only
+// supports first_parent plus standard offset pagination. So the root is
+// found by walking first-parent history to its last page and taking that
+// page's last entry.
 func (c *LiveClient) resolveRootCommitSHA(ctx context.Context, owner, repo string) (string, error) {
 	branch, err := c.getDefaultBranch(ctx, owner, repo)
 	if err != nil {
 		return "", fmt.Errorf("get default branch: %w", err)
 	}
 	proj := projectPath(owner, repo)
-	params := url.Values{}
-	if branch != "" {
-		params.Set("ref_name", branch)
+
+	var root string
+	for page := 1; page <= maxTreePages; page++ {
+		params := url.Values{}
+		if branch != "" {
+			params.Set("ref_name", branch)
+		}
+		params.Set("first_parent", "true")
+		params.Set("per_page", "100")
+		params.Set("page", fmt.Sprintf("%d", page))
+		resp, err := c.get(ctx, fmt.Sprintf("/projects/%s/repository/commits?%s", proj, params.Encode()))
+		if err != nil {
+			return "", fmt.Errorf("list root commits: %w", err)
+		}
+
+		nextPage := resp.Header.Get("X-Next-Page")
+
+		var commits []struct {
+			ID string `json:"id"`
+		}
+		if err := decodeJSON(resp, &commits); err != nil {
+			return "", fmt.Errorf("decode commits: %w", err)
+		}
+		if len(commits) == 0 {
+			break
+		}
+		root = commits[len(commits)-1].ID
+
+		if nextPage == "" || len(commits) < 100 {
+			break
+		}
 	}
-	params.Set("order_by", "committed_date")
-	params.Set("sort", "asc")
-	params.Set("per_page", "1")
-	resp, err := c.get(ctx, fmt.Sprintf("/projects/%s/repository/commits?%s", proj, params.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("list root commits: %w", err)
-	}
-	var commits []struct {
-		ID string `json:"id"`
-	}
-	if err := decodeJSON(resp, &commits); err != nil {
-		return "", fmt.Errorf("decode commits: %w", err)
-	}
-	if len(commits) == 0 || commits[0].ID == "" {
+
+	if root == "" {
 		return "", fmt.Errorf("%w: no root commit for %s/%s", forge.ErrNotFound, owner, repo)
 	}
-	return commits[0].ID, nil
+	return root, nil
 }
 
 // CommitFiles atomically commits multiple files to the default branch
