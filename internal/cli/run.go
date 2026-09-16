@@ -3337,20 +3337,23 @@ func sensitiveEnvKey(key string) bool {
 // diagnostics the agent needs to read.
 const minRedactableSecretLen = 8
 
-// redactFeedback strips credentials from validation output before it is
-// injected into the agent prompt.
+// redactFeedback strips credentials from script-produced output before it
+// reaches a trust boundary: validation feedback injected into the agent
+// prompt, and (issue #7363) pre-script hard-failure detail surfaced on the
+// completion status comment, OTLP span, and CLI stderr.
 //
-// This is a trust boundary, not defense in depth. The validation script runs
-// on the runner with the full runner environment (validationEnv passes
-// h.RunnerEnv verbatim), which for the code and fix harnesses includes
-// PUSH_TOKEN — the push credential that, per harness/code.yaml, "never enters
-// the sandbox". Its combined output then becomes the next iteration's prompt
-// inside the sandbox and is recorded in the agent transcript. A validation
-// script that fails while echoing its environment (set -x over a tokenized
-// remote, a git error embedding credentials in a URL) would otherwise hand the
-// agent a credential it is specifically not allowed to hold. #6494 widens the
-// exposure further by routing pre-commit output — arbitrary repo hook code —
-// through this same path.
+// This is a trust boundary, not defense in depth. Scripts run on the runner
+// with the full runner environment (validationEnv and the pre-script's env
+// both pass h.RunnerEnv verbatim), which for the code and fix harnesses
+// includes PUSH_TOKEN — the push credential that, per harness/code.yaml,
+// "never enters the sandbox". Validation output becomes the next iteration's
+// prompt inside the sandbox and is recorded in the agent transcript; a
+// pre-script's hard-failure detail is posted to the PR. A script that fails
+// while echoing its environment (set -x over a tokenized remote, a git error
+// embedding credentials in a URL) would otherwise leak a credential it is
+// specifically not allowed to hold. #6494 widens the exposure further by
+// routing pre-commit output — arbitrary repo hook code — through this same
+// path.
 //
 // Two passes, because neither alone is sufficient: literal replacement of
 // known credential values from the runner env catches opaque tokens with no
@@ -3929,6 +3932,12 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 			printer.StepFail("Pre-script failed")
 			detail := preScriptFailureDetail(stdoutBuf.String(), stderrBuf.String())
 			if detail != "" {
+				// detail flows into the sticky status comment, the OTLP span,
+				// and CLI stderr (via runErr.Error()) — the same redaction
+				// pass applied to validation feedback before it reaches the
+				// agent prompt, since a pre-script can just as easily echo a
+				// credential on its way to a hard failure.
+				detail = redactFeedback(detail, h.RunnerEnv)
 				return prescript.Result{}, fmt.Errorf("running pre-script: %w: %s", runErr, detail)
 			}
 			return prescript.Result{}, fmt.Errorf("running pre-script: %w", runErr)
@@ -3943,7 +3952,10 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 		result.Skipped = true
 		result.Outputs["skipped"] = "true"
 		if result.Reason == "" {
-			result.Reason = lastNonEmptyLine(stdoutBuf.String())
+			// Same redaction as the hard-failure detail below: this reason is
+			// derived from incidental stdout, not a value the script author
+			// chose to put in a reason= line, so it gets the same scrub.
+			result.Reason = redactFeedback(lastNonEmptyLine(stdoutBuf.String()), h.RunnerEnv)
 		}
 		if result.Reason != "" {
 			result.Outputs["reason"] = result.Reason
@@ -3980,13 +3992,19 @@ func lastNonEmptyLine(s string) string {
 // preScriptFailureDetail extracts a human-readable explanation from a
 // pre-script's captured stdout and stderr for the hard-failure path
 // (issue #7363). Preference:
-//  1. GitHub Actions error annotations (::error:: / ##[error]) from
-//     either stream, joined in the order they appeared.
+//  1. GitHub Actions error annotations (::error:: / ##[error]) from either
+//     stream: all stdout annotations first, then all stderr annotations, each
+//     group in the order it appeared on its own stream. This is stream order,
+//     not true chronological order across the two streams — the two buffers
+//     are concatenated (stdout, then stderr) before scanning, so a stderr
+//     annotation written before a stdout one still sorts after it.
 //  2. The last non-empty stderr line.
 //  3. The last non-empty stdout line.
 //
 // Each candidate is sanitized the same way as the exit-78 stdout
-// fallback (control characters stripped, capped at 1024 bytes).
+// fallback (control characters stripped, capped at 1024 bytes). The caller
+// is responsible for redacting secrets before the result reaches a status
+// comment, span, or log — see the redactFeedback call at the call site.
 func preScriptFailureDetail(stdout, stderr string) string {
 	if msg := ghaErrorDetail(stdout + "\n" + stderr); msg != "" {
 		return msg

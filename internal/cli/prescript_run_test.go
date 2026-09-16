@@ -396,6 +396,44 @@ func TestRunPreScript_HardFailureIncludesGHAErrorOnStdout(t *testing.T) {
 	require.ErrorContains(t, err, "A human can still direct the agent with /fs-fix (up to 10 total iterations).")
 }
 
+// A pre-script's hard-failure detail is posted to the visible PR status
+// comment, so a credential value from the runner env that a script echoes
+// on its way to a hard failure must not reach that comment verbatim.
+func TestRunPreScript_HardFailureRedactsRunnerEnvSecret(t *testing.T) {
+	printer := ui.New(io.Discard)
+	h := &harness.Harness{
+		PreScript: writePreScript(t,
+			"echo \"remote is https://x-access-token:${PUSH_TOKEN}@github.com/o/r.git\" >&2\n"+
+				"exit 1\n"),
+		RunnerEnv: map[string]string{"PUSH_TOKEN": "supersecretpushtokenvalue1234567890"},
+	}
+
+	_, err := runPreScript(h, t.TempDir(), "", printer)
+	require.ErrorContains(t, err, "running pre-script")
+	assert.NotContains(t, err.Error(), "supersecretpushtokenvalue1234567890")
+	assert.Contains(t, err.Error(), "[REDACTED:PUSH_TOKEN]")
+}
+
+// The exit-78 stdout-derived reason has the same exposure as the
+// hard-failure detail — it is incidental script output, not a value the
+// script author deliberately chose to put in a reason= line — and gets the
+// same redaction pass.
+func TestRunPreScript_Exit78StdoutReasonRedactsRunnerEnvSecret(t *testing.T) {
+	printer := ui.New(io.Discard)
+	h := &harness.Harness{
+		PreScript: writePreScript(t,
+			"echo \"skip check used token ${PUSH_TOKEN}\"\n"+
+				"exit 78\n"),
+		RunnerEnv: map[string]string{"PUSH_TOKEN": "supersecretpushtokenvalue1234567890"},
+	}
+
+	res, err := runPreScript(h, t.TempDir(), "", printer)
+	require.NoError(t, err)
+	assert.True(t, res.Skipped)
+	assert.NotContains(t, res.Reason, "supersecretpushtokenvalue1234567890")
+	assert.Contains(t, res.Reason, "[REDACTED:PUSH_TOKEN]")
+}
+
 func TestPreScriptFailureDetail(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -468,6 +506,16 @@ func TestPreScriptFailureDetail(t *testing.T) {
 			stdout: "  \n\n",
 			stderr: "\t\n",
 			want:   "",
+		},
+		{
+			// The implementation scans a stdout+stderr concatenation, so
+			// stdout annotations always sort first even when the stderr
+			// annotation was actually written first — stream order, not
+			// true chronological order (see the doc comment).
+			name:   "mixed-stream annotations: stdout group first regardless of write order",
+			stdout: "::error::from stdout\n",
+			stderr: "::error::from stderr\n",
+			want:   "from stdout from stderr",
 		},
 	}
 	for _, tc := range tests {
