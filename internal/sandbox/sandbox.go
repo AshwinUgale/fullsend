@@ -825,14 +825,37 @@ func profileFileLockPath(id string) string {
 
 // EnableProvidersV2 enables the providers_v2_enabled setting globally in the
 // openshell gateway. This is idempotent and can be called multiple times.
+//
+// If OpenShell has dropped the setting (v2 is the sole/default mode), the
+// unknown-key error is treated as success so a gateway bump does not abort
+// the run.
 func EnableProvidersV2() error {
 	ctx, cancel := context.WithTimeout(context.Background(), providerTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "openshell", "settings", "set", "--key", "providers_v2_enabled", "--value", "true", "--global", "--yes").CombinedOutput()
 	if err != nil {
+		if isUnknownProvidersV2Setting(string(out)) {
+			return nil
+		}
 		return fmt.Errorf("failed to enable providers_v2: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// isUnknownProvidersV2Setting reports whether openshell rejected
+// providers_v2_enabled as an unknown settings key. OpenShell is dropping
+// that key once v2 is the only mode; matching both the "unknown setting
+// key" phrasing and the key name keeps the recover narrow so unrelated
+// settings failures still abort the run.
+//
+// NOTE: This matches literal text from the openshell CLI's stderr output.
+// If openshell changes its error wording, this check will silently stop
+// matching and EnableProvidersV2 will start failing again. Update the
+// substrings if the upstream message changes.
+func isUnknownProvidersV2Setting(output string) bool {
+	msg := strings.ToLower(output)
+	return strings.Contains(msg, "unknown setting key") &&
+		strings.Contains(msg, "providers_v2_enabled")
 }
 
 // effectiveReadyTimeout returns the sandbox ready timeout to use. Priority:

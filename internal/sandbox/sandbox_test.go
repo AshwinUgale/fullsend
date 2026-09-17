@@ -136,6 +136,106 @@ func TestEnableProvidersV2_OpenshellNotInPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "providers_v2")
 }
 
+func TestEnableProvidersV2(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		wantErr bool
+	}{
+		{
+			name:   "success",
+			script: "#!/bin/sh\nexit 0\n",
+		},
+		{
+			name: "unknown setting key",
+			// Captured from a real OpenShell CLI after providers_v2_enabled
+			// was removed. Box-drawing and the × marker must not prevent a match.
+			script: "#!/bin/sh\n" +
+				"echo \"Error:   \u00d7 unknown setting key 'providers_v2_enabled'. Allowed keys:\" >&2\n" +
+				"echo \"  \u2502 ocsf_json_enabled, ocsf_schema_version, agent_policy_proposals_enabled,\" >&2\n" +
+				"echo \"  \u2502 proposal_approval_mode\" >&2\n" +
+				"exit 1\n",
+		},
+		{
+			name: "unknown setting key mixed case",
+			script: "#!/bin/sh\n" +
+				"echo \"Unknown Setting Key 'PROVIDERS_V2_ENABLED'\" >&2\n" +
+				"exit 1\n",
+		},
+		{
+			name: "permission denied",
+			script: "#!/bin/sh\n" +
+				"echo \"permission denied\" >&2\n" +
+				"exit 1\n",
+			wantErr: true,
+		},
+		{
+			name: "unknown other key",
+			script: "#!/bin/sh\n" +
+				"echo \"unknown setting key 'ocsf_json_enabled'\" >&2\n" +
+				"exit 1\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "openshell"), []byte(tt.script), 0o755))
+			t.Setenv("PATH", dir)
+
+			err := EnableProvidersV2()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "providers_v2")
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestIsUnknownProvidersV2Setting(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name: "real openshell unknown-key error",
+			output: "Error:   \u00d7 unknown setting key 'providers_v2_enabled'. Allowed keys:\n" +
+				"  \u2502 ocsf_json_enabled, ocsf_schema_version",
+			want: true,
+		},
+		{
+			name:   "mixed case",
+			output: "Unknown Setting Key 'PROVIDERS_V2_ENABLED'",
+			want:   true,
+		},
+		{
+			name:   "empty",
+			output: "",
+		},
+		{
+			name:   "unknown key without providers_v2_enabled",
+			output: "unknown setting key 'ocsf_json_enabled'",
+		},
+		{
+			name:   "key name without unknown-setting phrasing",
+			output: "failed to set providers_v2_enabled: permission denied",
+		},
+		{
+			name:   "unrelated error",
+			output: "permission denied",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isUnknownProvidersV2Setting(tt.output))
+		})
+	}
+}
+
 func TestExec_OpenshellNotInPath(t *testing.T) {
 	t.Setenv("PATH", "")
 
