@@ -614,7 +614,7 @@ func matchingAllowedPrefix(rawURL string, allowlist []string) string {
 //   - Slices (skills, plugins, providers, api_servers): base +
 //     child (concatenated; plugins must still have distinct basenames,
 //     which Validate enforces after the merge)
-//   - Maps (runner_env): base merged with child; child keys win
+//   - Maps (runner_env, privilege_levels): base merged with child; child keys win
 //   - Pointer structs (validation_loop, security): child replaces if non-nil
 //   - host_files: concatenated with last-writer-wins dedup by Dest
 //   - allowed_remote_resources: NOT merged (security; child must declare its own)
@@ -731,6 +731,19 @@ func mergeBaseIntoChild(base, child *Harness) {
 			merged[k] = v
 		}
 		child.RunnerEnv = merged
+	}
+
+	// PrivilegeLevels: merge maps, child keys win. A child can override a
+	// single stage (e.g. runtime: read) while inheriting the base default.
+	if base.PrivilegeLevels != nil {
+		merged := make(map[string]string, len(base.PrivilegeLevels)+len(child.PrivilegeLevels))
+		for k, v := range base.PrivilegeLevels {
+			merged[k] = v
+		}
+		for k, v := range child.PrivilegeLevels {
+			merged[k] = v
+		}
+		child.PrivilegeLevels = merged
 	}
 
 	// Env: merge sub-maps independently, child keys win (ADR 0055)

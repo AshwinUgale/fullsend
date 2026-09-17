@@ -149,6 +149,8 @@ trigger: |
     && event.transition.label.name == "ready-for-my-agent"
     && event.transition.label.action == "added"
 timeout_minutes: 15
+# privilege_levels:            # optional; omitted = write for every stage
+#   runtime: read              # LLM sandbox token; pre/post scripts stay write
 ```
 
 > **`role` is not the agent's name.** The agent's name is `name:` in its `.md`;
