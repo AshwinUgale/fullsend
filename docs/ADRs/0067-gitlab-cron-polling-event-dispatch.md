@@ -311,7 +311,19 @@ protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
 > branches (see "Watermark tampering" below). Phase 3c (#7381) dropped
 > the created bot PAT from Maintainer (40) to Developer (30); uninstall
 > deletes both state branches. The historical Maintainer-role
-> description above is superseded.
+> description above is superseded for the CI/CD-variable rationale
+> only. It is not superseded for the #5556 "New permission requirement"
+> above: `internal/poll/dispatch.go` still calls `CreatePipeline` on the
+> protected default branch, which requires merge or push access. Under
+> GitLab's default "Protected" branch preset (Developers and
+> Maintainers can merge), Developer (30) still satisfies that
+> requirement, but a repo whose branch protection restricts both merge
+> and push to Maintainers will get a 403 on pipeline creation and
+> dispatch will silently stop working. This change does not verify or
+> grant that access; operators using a stricter branch-protection
+> configuration must grant Developers merge (or push) access to the
+> default branch, or keep the bot PAT at Maintainer (40), for dispatch
+> to keep working.
 
 Key properties:
 

@@ -56,6 +56,14 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 		// "api" scope is required for REST and GraphQL (MR operations, poll-state
 		// branch writes). Developer (30) is sufficient now that poller state lives
 		// on unprotected branches rather than Maintainer-only CI/CD variables.
+		//
+		// Residual dependency: the poller also creates pipelines via
+		// CreatePipeline on the protected default branch (ADR 0067), which
+		// requires merge or push access. Developer (30) satisfies that under
+		// GitLab's default "Protected" preset, but a repo whose branch
+		// protection restricts merge and push to Maintainers will get a 403
+		// on pipeline creation. This is not verified or granted here; see
+		// docs/cli/repos.md "GitLab bot token".
 		token, err := glClient.CreateProjectAccessToken(ctx, owner, repo, gitlabBotTokenName,
 			[]string{"api"}, gitlabAccessLevelDeveloper, expiresAt)
 		if err != nil {

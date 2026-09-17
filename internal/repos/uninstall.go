@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
-	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 )
 
@@ -303,7 +302,7 @@ func uninstallRepoResources(ctx context.Context, cfg ResolvedConfig, direct bool
 // an error so uninstall stays idempotent on older installs.
 func deleteGitLabPollStateBranches(ctx context.Context, client forge.Client, owner, repo string) error {
 	var errs []error
-	for _, branch := range []string{poll.PollStateBranchSlash, poll.PollStateBranchEvents} {
+	for _, branch := range gitlabPollStateBranches {
 		if err := client.DeleteRef(ctx, owner, repo, "heads/"+branch); err != nil && !errors.Is(err, forge.ErrNotFound) {
 			errs = append(errs, fmt.Errorf("deleting poll-state branch %s: %w", branch, err))
 		}
