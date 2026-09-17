@@ -378,6 +378,19 @@ error does not block the skip. See the
 [normative spec](../../normative/prescript-output/v1/README.md#exit-code-78--neutral-skip)
 for full details.
 
+**Hard failures.** A non-zero exit other than 78 fails the run. Print a GitHub
+Actions error annotation so the message appears in the PR status comment
+instead of a bare `exit status 1`:
+
+```bash
+echo "::error::Fix iteration ${ITERATION} exceeds bot cap of ${CAP}. Escalating to human."
+exit 1
+```
+
+Without an annotation, the last non-empty stderr line (then stdout) is used.
+See the [normative spec](../../normative/prescript-output/v1/README.md#hard-failure-diagnostics)
+for the full preference order and sanitization rules.
+
 ### Post-script (action execution)
 
 `.fullsend/scripts/post-my-agent.sh`:

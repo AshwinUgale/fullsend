@@ -3337,20 +3337,23 @@ func sensitiveEnvKey(key string) bool {
 // diagnostics the agent needs to read.
 const minRedactableSecretLen = 8
 
-// redactFeedback strips credentials from validation output before it is
-// injected into the agent prompt.
+// redactFeedback strips credentials from script-produced output before it
+// reaches a trust boundary: validation feedback injected into the agent
+// prompt, and (issue #7363) pre-script hard-failure detail surfaced on the
+// completion status comment, OTLP span, and CLI stderr.
 //
-// This is a trust boundary, not defense in depth. The validation script runs
-// on the runner with the full runner environment (validationEnv passes
-// h.RunnerEnv verbatim), which for the code and fix harnesses includes
-// PUSH_TOKEN — the push credential that, per harness/code.yaml, "never enters
-// the sandbox". Its combined output then becomes the next iteration's prompt
-// inside the sandbox and is recorded in the agent transcript. A validation
-// script that fails while echoing its environment (set -x over a tokenized
-// remote, a git error embedding credentials in a URL) would otherwise hand the
-// agent a credential it is specifically not allowed to hold. #6494 widens the
-// exposure further by routing pre-commit output — arbitrary repo hook code —
-// through this same path.
+// This is a trust boundary, not defense in depth. Scripts run on the runner
+// with the full runner environment (validationEnv and the pre-script's env
+// both pass h.RunnerEnv verbatim), which for the code and fix harnesses
+// includes PUSH_TOKEN — the push credential that, per harness/code.yaml,
+// "never enters the sandbox". Validation output becomes the next iteration's
+// prompt inside the sandbox and is recorded in the agent transcript; a
+// pre-script's hard-failure detail is posted to the PR. A script that fails
+// while echoing its environment (set -x over a tokenized remote, a git error
+// embedding credentials in a URL) would otherwise leak a credential it is
+// specifically not allowed to hold. #6494 widens the exposure further by
+// routing pre-commit output — arbitrary repo hook code — through this same
+// path.
 //
 // Two passes, because neither alone is sufficient: literal replacement of
 // known credential values from the runner env catches opaque tokens with no
@@ -3895,7 +3898,10 @@ func resolveTraceIdentity(ctx context.Context, tracer trace.Tracer, inboundTP, i
 //     file content. The output file is still parsed best-effort for reason and
 //     other outputs; if parsing fails, the skip proceeds with stdout as the
 //     reason. This lets simple scripts just `echo "No work" && exit 78`.
-//   - Any other non-zero exit: hard failure.
+//   - Any other non-zero exit: hard failure. Captured stdout/stderr is
+//     attached to the error (GHA ::error:: / ##[error] annotations
+//     preferred) so the status comment can show the script's own
+//     message instead of a bare "exit status 1" (issue #7363).
 //
 // A malformed output file on exit 0 is a hard failure so a mistyped skip
 // cannot silently proceed.
@@ -3911,11 +3917,12 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 	preCmd := exec.Command(h.PreScript)
 	preCmd.Env = append(childScriptEnv(h.RunnerEnv, traceparent), prescript.EnvVar+"="+outPath)
 
-	// Tee stdout so we can use it as a fallback skip reason when the
-	// script exits 78 without writing a reason to the output file.
-	var stdoutBuf bytes.Buffer
+	// Tee stdout and stderr so skip-reason fallback (exit 78) and
+	// hard-failure diagnostics can recover the script's own message
+	// while still streaming to the Actions log.
+	var stdoutBuf, stderrBuf bytes.Buffer
 	preCmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-	preCmd.Stderr = os.Stderr
+	preCmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	runErr := preCmd.Run()
 	if runErr != nil {
@@ -3923,6 +3930,16 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != prescript.ExitCodeNeutral {
 			printer.StepFail("Pre-script failed")
+			detail := preScriptFailureDetail(stdoutBuf.String(), stderrBuf.String())
+			if detail != "" {
+				// detail flows into the sticky status comment, the OTLP span,
+				// and CLI stderr (via runErr.Error()) — the same redaction
+				// pass applied to validation feedback before it reaches the
+				// agent prompt, since a pre-script can just as easily echo a
+				// credential on its way to a hard failure.
+				detail = redactFeedback(detail, h.RunnerEnv)
+				return prescript.Result{}, fmt.Errorf("running pre-script: %w: %s", runErr, detail)
+			}
 			return prescript.Result{}, fmt.Errorf("running pre-script: %w", runErr)
 		}
 
@@ -3935,7 +3952,10 @@ func runPreScript(h *harness.Harness, runDir, traceparent string, printer *ui.Pr
 		result.Skipped = true
 		result.Outputs["skipped"] = "true"
 		if result.Reason == "" {
-			result.Reason = lastNonEmptyLine(stdoutBuf.String())
+			// Same redaction as the hard-failure detail below: this reason is
+			// derived from incidental stdout, not a value the script author
+			// chose to put in a reason= line, so it gets the same scrub.
+			result.Reason = redactFeedback(lastNonEmptyLine(stdoutBuf.String()), h.RunnerEnv)
 		}
 		if result.Reason != "" {
 			result.Outputs["reason"] = result.Reason
@@ -3963,17 +3983,83 @@ func lastNonEmptyLine(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if l := strings.TrimSpace(lines[i]); l != "" {
-			l = stripControlChars(l)
-			if len(l) > 1024 {
-				l = l[:1024]
-				for len(l) > 0 && !utf8.Valid([]byte(l)) {
-					l = l[:len(l)-1]
-				}
-			}
-			return l
+			return sanitizeScriptLine(l)
 		}
 	}
 	return ""
+}
+
+// preScriptFailureDetail extracts a human-readable explanation from a
+// pre-script's captured stdout and stderr for the hard-failure path
+// (issue #7363). Preference:
+//  1. GitHub Actions error annotations (::error:: / ##[error]) from either
+//     stream: all stdout annotations first, then all stderr annotations, each
+//     group in the order it appeared on its own stream. This is stream order,
+//     not true chronological order across the two streams — the two buffers
+//     are concatenated (stdout, then stderr) before scanning, so a stderr
+//     annotation written before a stdout one still sorts after it.
+//  2. The last non-empty stderr line.
+//  3. The last non-empty stdout line.
+//
+// Each candidate is sanitized the same way as the exit-78 stdout
+// fallback (control characters stripped, capped at 1024 bytes). The caller
+// is responsible for redacting secrets before the result reaches a status
+// comment, span, or log — see the redactFeedback call at the call site.
+func preScriptFailureDetail(stdout, stderr string) string {
+	if msg := ghaErrorDetail(stdout + "\n" + stderr); msg != "" {
+		return msg
+	}
+	if msg := lastNonEmptyLine(stderr); msg != "" {
+		return msg
+	}
+	return lastNonEmptyLine(stdout)
+}
+
+func ghaErrorDetail(s string) string {
+	var msgs []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if msg, ok := parseGHAErrorLine(line); ok && msg != "" {
+			msgs = append(msgs, msg)
+		}
+	}
+	if len(msgs) == 0 {
+		return ""
+	}
+	return sanitizeScriptLine(strings.Join(msgs, " "))
+}
+
+// parseGHAErrorLine extracts the message from a GitHub Actions error
+// annotation. Accepts the workflow-command form (::error::msg or
+// ::error k=v::msg) and the logging-command form (##[error]msg).
+func parseGHAErrorLine(line string) (string, bool) {
+	const loggingPrefix = "##[error]"
+	if strings.HasPrefix(line, loggingPrefix) {
+		return strings.TrimSpace(line[len(loggingPrefix):]), true
+	}
+	if !strings.HasPrefix(line, "::error::") && !strings.HasPrefix(line, "::error ") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(line, "::error")
+	idx := strings.Index(rest, "::")
+	if idx < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[idx+2:]), true
+}
+
+// sanitizeScriptLine strips control characters and caps at 1024 bytes,
+// trimming trailing incomplete UTF-8. Used for skip reasons and
+// hard-failure details recovered from pre-script output.
+func sanitizeScriptLine(s string) string {
+	s = stripControlChars(s)
+	if len(s) > 1024 {
+		s = s[:1024]
+		for len(s) > 0 && !utf8.Valid([]byte(s)) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
 }
 
 func stripControlChars(s string) string {

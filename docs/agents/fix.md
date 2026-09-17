@@ -92,6 +92,8 @@ The fix agent enforces iteration caps to prevent infinite review-fix loops:
   across bot and human triggers.
 - When a bot-triggered run is approaching the bot cap, the agent applies the
   `needs-human` label.
+- When the cap is exceeded, the run fails before the sandbox starts and the
+  status comment shows the escalation message (a human can still `/fs-fix`).
 - Each `/fs-fix` comment cancels any in-flight fix run for the same PR and
   starts a new one.
 
