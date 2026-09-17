@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -947,6 +948,34 @@ func runOpenAIRefresh(ctx context.Context, h openAIProviderHandle, printer *ui.P
 		expiresAt = next
 		printer.StepDone(fmt.Sprintf("OpenAI credential refreshed for %s (%s, next expiry in %s)", h.name, h.source, time.Until(expiresAt).Round(time.Minute)))
 	}
+}
+
+// startOpenAIRefreshers launches one refresh goroutine per handle, mirroring
+// the launch in the run-scoped provider creation loop in runAgent. It
+// returns one stop-and-wait func per handle, in the same order as handles,
+// for the caller to register via `defer` directly (defer is lexically
+// scoped, so this helper cannot register the cleanup itself) and to reuse
+// when a stage needs to pause and later resume refreshers around a token
+// remint's os.Setenv/os.Unsetenv calls — see the pre-script remint call site
+// in runAgent, which pauses refreshers around maybeRemintAgentTokenForStage
+// and preRestore, then restarts them with this helper so the credential
+// keeps refreshing for the sandbox stage that follows.
+func startOpenAIRefreshers(handles []openAIProviderHandle, printer *ui.Printer) []func() {
+	stops := make([]func(), 0, len(handles))
+	for _, handle := range handles {
+		refreshCtx, stopRefresh := context.WithCancel(context.Background())
+		var refreshWg sync.WaitGroup
+		refreshWg.Add(1)
+		go func(handle openAIProviderHandle) {
+			defer refreshWg.Done()
+			runOpenAIRefresh(refreshCtx, handle, printer)
+		}(handle)
+		stops = append(stops, func() {
+			stopRefresh()
+			refreshWg.Wait()
+		})
+	}
+	return stops
 }
 
 // cleanupRunScopedProvider removes a run-scoped provider at the end of the

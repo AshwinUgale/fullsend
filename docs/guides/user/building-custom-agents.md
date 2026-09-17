@@ -181,6 +181,10 @@ validation_loop:
 
 post_script: scripts/post-my-agent.sh
 
+# Optional: give the sandbox a read-only token (default is write everywhere).
+# privilege_levels:
+#   runtime: read
+
 env:
   runner:
     MY_VAR: "${MY_VAR}"

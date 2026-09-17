@@ -27,6 +27,7 @@ Common configuration goals:
 | Control status comments | Configure `status_notifications` in `config.yaml` |
 | Teach agents your conventions | Use [AGENTS.md](customizing-with-agents-md.md) (no harness change needed) |
 | Give an agent domain knowledge | Use [skills](customizing-with-skills.md) (no harness change needed) |
+| Limit sandbox token privilege | Set `privilege_levels.runtime: read` so write tokens stay on pre/post scripts |
 
 ## Configuration with `base:` composition
 

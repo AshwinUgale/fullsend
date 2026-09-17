@@ -5190,6 +5190,7 @@ func TestMintAgentToken_CoderRole(t *testing.T) {
 	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
 		assert.Equal(t, "https://mint.example.com", req.MintURL)
 		assert.Equal(t, "coder", req.Role)
+		assert.Equal(t, "write", req.Level)
 		assert.Equal(t, []string{"my-repo"}, req.Repos)
 		return &mintclient.MintResult{Token: "ghs_coder_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
 	}
@@ -5217,8 +5218,59 @@ func TestMintAgentToken_CoderRole(t *testing.T) {
 	assert.Equal(t, "", os.Getenv("PUSH_TOKEN_SOURCE"), "cleanup should restore PUSH_TOKEN_SOURCE to original empty value")
 
 	output := buf.String()
-	assert.Contains(t, output, "Minting agent token (role: coder)")
+	assert.Contains(t, output, "Minting agent token")
+	assert.Contains(t, output, "role: coder")
+	assert.Contains(t, output, "level: write")
 	assert.Contains(t, output, "Agent token minted")
+}
+
+func TestMintAgentTokenAtLevel_PassesLevel(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var gotLevel string
+	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
+		gotLevel = req.Level
+		return &mintclient.MintResult{Token: "ghs_read_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GH_TOKEN", "")
+
+	printer := ui.New(io.Discard)
+	minted, cleanup, err := mintAgentTokenAtLevel(context.Background(), "coder", "https://mint.example.com", "", "read", printer)
+	require.NoError(t, err)
+	defer cleanup()
+	assert.True(t, minted)
+	assert.Equal(t, "read", gotLevel)
+	assert.Equal(t, "ghs_read_token", os.Getenv("GH_TOKEN"))
+}
+
+func TestMintAgentTokenAtLevel_EmptyLevelDefaultsToWrite(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var gotLevel string
+	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
+		gotLevel = req.Level
+		return &mintclient.MintResult{Token: "ghs_write_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GH_TOKEN", "")
+
+	printer := ui.New(io.Discard)
+	_, cleanup, err := mintAgentTokenAtLevel(context.Background(), "coder", "https://mint.example.com", "", "", printer)
+	require.NoError(t, err)
+	defer cleanup()
+	assert.Equal(t, "write", gotLevel)
+}
+
+func TestMintAgentTokenAtLevel_RejectsInvalidLevel(t *testing.T) {
+	printer := ui.New(io.Discard)
+	_, _, err := mintAgentTokenAtLevel(context.Background(), "coder", "https://mint.example.com", "", "WRITE", printer)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid privilege level")
 }
 
 func TestMintAgentToken_ReviewRole(t *testing.T) {
@@ -5753,7 +5805,8 @@ func TestRemintAgentTokenForPostScript_PostScriptEnvUsesFreshToken(t *testing.T)
 	}
 	assert.Equal(t, "ghs_original_token", h.RunnerEnv["PUSH_TOKEN"])
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 
 	env := postScriptEnv(h, "")
 	assert.Equal(t, 2, calls)
@@ -5773,6 +5826,165 @@ func TestRemintAgentTokenForPostScript_PostScriptEnvUsesFreshToken(t *testing.T)
 	cleanup()
 	assert.Equal(t, "", os.Getenv("PUSH_TOKEN"), "cleanup must restore the pre-mint value after remintCleanup has already run")
 	assert.Equal(t, "", os.Getenv("GH_TOKEN"), "cleanup must restore the pre-mint value after remintCleanup has already run")
+}
+
+func TestRemintAgentTokenForPostScript_UsesPostScriptPrivilegeLevel(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var levels []string
+	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
+		levels = append(levels, req.Level)
+		return &mintclient.MintResult{Token: "ghs_" + req.Level + "_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN", "")
+
+	printer := ui.New(io.Discard)
+	_, cleanup, err := mintAgentTokenAtLevel(context.Background(), "coder", "https://mint.example.com", "", "read", printer)
+	require.NoError(t, err)
+	defer cleanup()
+
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:    "read",
+			harness.PrivilegeStagePostScript: "write",
+		},
+		RunnerEnv: map[string]string{
+			"GH_TOKEN":   os.Getenv("GH_TOKEN"),
+			"PUSH_TOKEN": os.Getenv("PUSH_TOKEN"),
+		},
+	}
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "read", printer)
+	require.NoError(t, remintErr)
+	defer remintCleanup()
+
+	require.Equal(t, []string{"read", "write"}, levels)
+	assert.Equal(t, "ghs_write_token", os.Getenv("GH_TOKEN"))
+}
+
+func TestMaybeRemintAgentTokenForStage_SkipsWhenLevelsMatch(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var calls int
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		calls++
+		return &mintclient.MintResult{Token: "ghs_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	h := &harness.Harness{Role: "coder"} // omitted privilege_levels → write everywhere
+	printer := ui.New(io.Discard)
+	restore, err := maybeRemintAgentTokenForStage(context.Background(), h, "https://mint.example.com", "", harness.PrivilegeStagePreScript, "write", printer)
+	require.NoError(t, err)
+	restore()
+	assert.Equal(t, 0, calls)
+}
+
+func TestMaybeRemintAgentTokenForStage_RemintsAndRestores(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var levels []string
+	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
+		levels = append(levels, req.Level)
+		return &mintclient.MintResult{Token: "ghs_" + req.Level + "_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("PUSH_TOKEN", "")
+
+	printer := ui.New(io.Discard)
+	_, cleanup, err := mintAgentTokenAtLevel(context.Background(), "coder", "https://mint.example.com", "", "read", printer)
+	require.NoError(t, err)
+	defer cleanup()
+
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:   "read",
+			harness.PrivilegeStagePreScript: "write",
+		},
+		RunnerEnv: map[string]string{
+			"GH_TOKEN":   os.Getenv("GH_TOKEN"),
+			"PUSH_TOKEN": os.Getenv("PUSH_TOKEN"),
+		},
+	}
+	assert.Equal(t, "ghs_read_token", h.RunnerEnv["GH_TOKEN"])
+
+	restore, err := maybeRemintAgentTokenForStage(context.Background(), h, "https://mint.example.com", "", harness.PrivilegeStagePreScript, "read", printer)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"read", "write"}, levels)
+	assert.Equal(t, "ghs_write_token", os.Getenv("GH_TOKEN"))
+	assert.Equal(t, "ghs_write_token", h.RunnerEnv["GH_TOKEN"])
+
+	restore()
+	assert.Equal(t, "ghs_read_token", os.Getenv("GH_TOKEN"), "restore must put the runtime token back")
+	assert.Equal(t, "ghs_read_token", h.RunnerEnv["GH_TOKEN"])
+}
+
+func TestMaybeRemintAgentTokenForStage_ErrorIsFatal(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return nil, fmt.Errorf("mint rejected write level")
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:   "read",
+			harness.PrivilegeStagePreScript: "write",
+		},
+	}
+	printer := ui.New(io.Discard)
+	_, err := maybeRemintAgentTokenForStage(context.Background(), h, "https://mint.example.com", "", harness.PrivilegeStagePreScript, "read", printer)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mint rejected write level")
+}
+
+func TestMaybeRemintAgentTokenForStage_EmptyMintURLOrNilHarness(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		t.Fatal("mint should not be called")
+		return nil, nil
+	}
+	printer := ui.New(io.Discard)
+	h := &harness.Harness{Role: "coder", PrivilegeLevels: map[string]string{harness.PrivilegeStagePreScript: "write"}}
+
+	restore, err := maybeRemintAgentTokenForStage(context.Background(), h, "", "", harness.PrivilegeStagePreScript, "read", printer)
+	require.NoError(t, err)
+	restore()
+
+	restore, err = maybeRemintAgentTokenForStage(context.Background(), nil, "https://mint.example.com", "", harness.PrivilegeStagePreScript, "read", printer)
+	require.NoError(t, err)
+	restore()
+}
+
+func TestMaybeRemintAgentTokenForStage_SkipsGitLab(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		t.Fatal("mint should not be called on GitLab")
+		return nil, nil
+	}
+	h := &harness.Harness{
+		Role:            "coder",
+		PrivilegeLevels: map[string]string{harness.PrivilegeStagePreScript: "write"},
+	}
+	printer := ui.New(io.Discard)
+	restore, err := maybeRemintAgentTokenForStage(context.Background(), h, "https://mint.example.com", "gitlab", harness.PrivilegeStagePreScript, "read", printer)
+	require.NoError(t, err)
+	restore()
 }
 
 // TestRemintAgentTokenForPostScript_SurvivesCancelledParentCtx exercises the
@@ -5810,7 +6022,8 @@ func TestRemintAgentTokenForPostScript_SurvivesCancelledParentCtx(t *testing.T) 
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	remintCleanup := remintAgentTokenForPostScript(cancelledCtx, h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(cancelledCtx, h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer remintCleanup()
 
 	assert.Equal(t, 1, calls, "remint must still call mint despite an already-cancelled parent ctx")
@@ -5845,7 +6058,8 @@ func TestRemintAgentTokenForPostScript_DeadlineExceededGetsDistinctWarning(t *te
 	var buf bytes.Buffer
 	printer := ui.New(&buf)
 
-	cleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer cleanup()
 
 	assert.Contains(t, buf.String(), "timed out", "a context.DeadlineExceeded must produce a distinct message from a generic mint failure")
@@ -5885,7 +6099,8 @@ func TestRemintAgentTokenForPostScript_ErrorIsNonFatal(t *testing.T) {
 		},
 	}
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr, "a same-level remint failure must stay non-fatal")
 	defer remintCleanup()
 
 	assert.Equal(t, 2, calls)
@@ -5904,6 +6119,69 @@ func TestRemintAgentTokenForPostScript_ErrorIsNonFatal(t *testing.T) {
 	got, readErr := os.ReadFile(marker)
 	require.NoError(t, readErr)
 	assert.Equal(t, "ghs_original_token\n", string(got))
+}
+
+// TestRemintAgentTokenForPostScript_DowngradeErrorIsFatal covers the
+// privilege-escalation case a plain non-fatal remint failure would allow: a
+// harness author configuring the post-script stage at a strictly lower
+// privilege level than the runtime stage (runtime: write, post_script:
+// read). A remint failure there must not silently leave the more-privileged
+// runtime-stage token active for the post-script — it must be reported as
+// an error so the caller can fail the run instead of running the
+// post-script at all.
+func TestRemintAgentTokenForPostScript_DowngradeErrorIsFatal(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return nil, fmt.Errorf("mint rejected read level")
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:    "write",
+			harness.PrivilegeStagePostScript: "read",
+		},
+	}
+	printer := ui.New(io.Discard)
+
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.Error(t, remintErr, "a remint failure that would leave a more-privileged leftover token active must be fatal")
+	assert.Contains(t, remintErr.Error(), "mint rejected read level")
+	cleanup()
+}
+
+// TestRemintAgentTokenForPostScript_UnrankedCustomLevelMismatchIsFatal
+// covers a custom privilege level name (neither read, write, nor admin):
+// its relative rank against the active level cannot be determined by
+// mintcore.PermissionLevelAtLeast, but the configured post-script level
+// still differs from the active level, so a remint failure must be fatal
+// rather than silently leaving the leftover token active — ranking is not
+// required to detect the mismatch.
+func TestRemintAgentTokenForPostScript_UnrankedCustomLevelMismatchIsFatal(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return nil, fmt.Errorf("mint rejected custom level")
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:    "write",
+			harness.PrivilegeStagePostScript: "custom-level",
+		},
+	}
+	printer := ui.New(io.Discard)
+
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.Error(t, remintErr, "a level mismatch must be fatal even when the levels involved cannot be ranked")
+	assert.Contains(t, remintErr.Error(), "mint rejected custom level")
+	cleanup()
 }
 
 // TestRemintAgentTokenForPostScript_SkipsMintOnGitLabOrEmptyMintURL covers
@@ -5939,7 +6217,8 @@ func TestRemintAgentTokenForPostScript_SkipsMintOnGitLabOrEmptyMintURL(t *testin
 				},
 			}
 
-			cleanup := remintAgentTokenForPostScript(context.Background(), h, tc.mintURL, tc.forgePlatform, printer)
+			cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, tc.mintURL, tc.forgePlatform, "write", printer)
+			require.NoError(t, remintErr)
 			cleanup()
 
 			assert.Equal(t, 0, calls, "gitlab/empty mint URL must not call mint")
@@ -5978,7 +6257,8 @@ func TestRemintAgentTokenForPostScript_RunnerEnvMissingTokenKeys(t *testing.T) {
 		RunnerEnv: map[string]string{"UNRELATED_VAR": "keep-me"},
 	}
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer remintCleanup()
 
 	assert.Equal(t, 1, calls)
@@ -6033,6 +6313,7 @@ func TestRunAgent_FallsBackToFULLSEND_MINT_URL(t *testing.T) {
 	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
 		mintCalled = true
 		assert.Equal(t, "https://mint-from-env.example.com", req.MintURL)
+		assert.Equal(t, "write", req.Level, "omitted privilege_levels must mint write")
 		return &mintclient.MintResult{Token: "ghs_env_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
 	}
 
@@ -6051,6 +6332,52 @@ func TestRunAgent_FallsBackToFULLSEND_MINT_URL(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "openshell")
 	assert.True(t, mintCalled, "should have used FULLSEND_MINT_URL env var fallback")
+}
+
+func TestRunAgent_MintsRuntimePrivilegeLevel(t *testing.T) {
+	useFakeOpenshell(t)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "harness"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents"), 0o755))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "agents", "code.md"),
+		[]byte("You are a coding agent."),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "harness", "code.yaml"),
+		[]byte("agent: agents/code.md\nrole: coder\nprivilege_levels:\n  runtime: read\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "config.yaml"),
+		[]byte("agents:\n  - harness/code.yaml\n"),
+		0o644,
+	))
+
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	var gotLevel string
+	statusMintToken = func(_ context.Context, req mintclient.MintRequest) (*mintclient.MintResult, error) {
+		gotLevel = req.Level
+		return &mintclient.MintResult{Token: "ghs_read_token", ExpiresAt: "2026-06-15T12:00:00Z"}, nil
+	}
+
+	t.Setenv("FULLSEND_MINT_URL", "https://mint.example.com")
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	t.Setenv("GH_TOKEN", "")
+
+	var buf bytes.Buffer
+	rFlags := resolveFlags{maxDepth: 10, maxResources: 50}
+	printer := ui.New(&buf)
+	repoDir := t.TempDir()
+	err := runAgent(context.Background(), "code", dir, "", repoDir, "", nil, false, "", "", "", rFlags, statusOpts{}, printer, false, runOverrideFlags{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openshell")
+	assert.Equal(t, "read", gotLevel, "initial mint must request the runtime privilege level")
 }
 
 func TestRunAgent_WarnsWhenNoMintURL(t *testing.T) {
