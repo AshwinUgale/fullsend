@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 )
 
 // RepoState holds the installation state of a single repo as read
@@ -30,21 +31,39 @@ func ProbeRepoState(ctx context.Context, client forge.Client, owner, repo, forge
 		return RepoState{}, fmt.Errorf("probing components for %s/%s: %w", owner, repo, err)
 	}
 
-	// Check required variables — these distinguish per-repo from per-org.
+	// Check required components — these distinguish per-repo from per-org.
+	// GitHub uses FULLSEND_MINT_URL. GitLab poller state no longer lives
+	// in CI/CD variables, so install evidence is the bot token, a poll
+	// schedule, or a poll-state branch.
 	hasRequiredVar := false
 	state := RepoState{}
 	for _, c := range components {
 		if !c.Present {
 			continue
 		}
-		switch c.Name {
-		case "var:" + forge.VarMintURL:
+		switch {
+		case c.Name == "var:"+forge.VarMintURL:
 			hasRequiredVar = true
 			state.MintURL = c.Actual
-		case "var:" + forge.VarLastPollAtFast, "var:" + forge.VarLastPollAtFull, "var:" + forge.VarLabelState:
+		case c.Name == "secret:"+forge.SecretForgeToken:
 			hasRequiredVar = true
-		case "workflow":
+		case strings.HasPrefix(c.Name, "schedule:"):
+			hasRequiredVar = true
+		case c.Name == "workflow":
 			state.FullsendRef = c.Actual
+		}
+	}
+
+	if !hasRequiredVar && forgeName == ForgeGitLab {
+		for _, branch := range gitlabPollStateBranches {
+			_, err := client.GetFileContentAtRef(ctx, owner, repo, poll.PollStateFileName, branch)
+			if err == nil {
+				hasRequiredVar = true
+				break
+			}
+			if !forge.IsNotFound(err) {
+				return RepoState{}, fmt.Errorf("checking poll-state branch %s for %s/%s: %w", branch, owner, repo, err)
+			}
 		}
 	}
 

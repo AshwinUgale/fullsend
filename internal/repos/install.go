@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -242,16 +241,20 @@ func Install(ctx context.Context, cfg InstallConfig,
 	progress(repoFullName, "vars", fmt.Sprintf("Set %d repository variables", len(repoVars)))
 
 	// Step 5b: GitLab poll-state branches. Create both HMAC-signed
-	// state documents now, seeded from any legacy CI/CD vars just
-	// written (or already present) so the poller does not start from
-	// a missing-branch baseline. The 7 legacy vars stay until phase
-	// 3b (#7380) retires them.
+	// state documents now, seeded from any leftover legacy CI/CD
+	// vars, then delete those vars so they are not re-seeded.
 	if cfg.Forge == ForgeGitLab {
 		progress(repoFullName, "poll-state", "Seeding poll-state branches")
 		if err := seedGitLabPollState(ctx, client, cfg.Owner, cfg.Repo); err != nil {
 			return result, err
 		}
 		progress(repoFullName, "poll-state", "Poll-state branches seeded")
+		progress(repoFullName, "poll-state", "Retiring legacy poll-state variables")
+		for _, a := range retireGitLabLegacyVars(ctx, client, cfg.Owner, cfg.Repo, false, progress) {
+			if a.Action == "error" {
+				return result, fmt.Errorf("%s", a.Detail)
+			}
+		}
 	}
 
 	// Step 6: Write repository secrets. Skipped when reusing existing secrets.
@@ -461,16 +464,7 @@ func managedVarsForForge(cfg InstallConfig, mintURL string) ([]ManagedVar, error
 		}
 		return vars, nil
 	case ForgeGitLab:
-		now := time.Now().UTC().Format(time.RFC3339)
-		vars := []ManagedVar{
-			{Name: forge.VarLastPollAtFast, Value: now, Dynamic: true},
-			{Name: forge.VarLastPollAtFull, Value: now, Dynamic: true},
-			{Name: forge.VarLabelState, Value: "{}", Dynamic: true},
-			{Name: forge.VarDispatchedKeysFast, Value: "{}", Dynamic: true},
-			{Name: forge.VarDispatchedKeysFull, Value: "{}", Dynamic: true},
-			{Name: forge.VarFailedKeysFast, Value: "{}", Dynamic: true},
-			{Name: forge.VarFailedKeysFull, Value: "{}", Dynamic: true},
-		}
+		var vars []ManagedVar
 		if cfg.InferenceRegion != "" {
 			vars = append(vars, ManagedVar{Name: forge.VarGCPRegion, Value: cfg.InferenceRegion})
 		}
@@ -537,10 +531,26 @@ var requiredVariables = []string{forge.VarMintURL}
 // and uninstall.
 var requiredSecrets = []string{forge.SecretGCPProjectID, forge.SecretGCPWIFProvider}
 
-var gitlabRequiredVariables = []string{
+// gitlabRetiredLegacyVars is the set of GitLab poller CI/CD variables
+// superseded by HMAC-signed state.json on fullsend-poll-state-slash
+// and fullsend-poll-state-events. Distinct from the active managed
+// set: install does not seed them, CheckOrphanVars treats them as
+// known-retired (no spurious warnings), and converge migrate-then-
+// deletes any that are still present.
+var gitlabRetiredLegacyVars = []string{
 	forge.VarLastPollAtFast, forge.VarLastPollAtFull, forge.VarLabelState,
 	forge.VarDispatchedKeysFast, forge.VarDispatchedKeysFull,
 	forge.VarFailedKeysFast, forge.VarFailedKeysFull,
+}
+
+// gitlabPollStateBranches are the two HMAC-signed poll-state branches
+// created at install/converge. They are managed git refs, not scaffold
+// files on the default branch, so orphan-file detection never sees
+// them; any future orphan-branch detector must treat this set as
+// known-managed.
+var gitlabPollStateBranches = []string{
+	poll.PollStateBranchSlash,
+	poll.PollStateBranchEvents,
 }
 
 // seedGitLabPollState provisions FULLSEND_DISPATCH_SECRET if missing
@@ -558,9 +568,78 @@ func seedGitLabPollState(ctx context.Context, client forge.Client, owner, repo s
 	return nil
 }
 
+// retireGitLabLegacyVars migrates still-present retired poll-state
+// CI/CD variables into the branch-backed store (if the branches are
+// missing) and then deletes the variables. Idempotent: a repo whose
+// retired vars are already gone is a no-op. Dry-run reports the
+// deletions without writing.
+func retireGitLabLegacyVars(ctx context.Context, client forge.Client, owner, repo string, dryRun bool, progress ProgressFunc) []ComponentAction {
+	repoFullName := owner + "/" + repo
+	vars, err := client.ListRepoVariables(ctx, owner, repo)
+	if err != nil {
+		return []ComponentAction{{
+			Component: "variables",
+			Action:    "error",
+			Detail:    fmt.Sprintf("listing variables to retire legacy poll state: %v", err),
+		}}
+	}
+
+	var present []string
+	for _, name := range gitlabRetiredLegacyVars {
+		if _, ok := vars[name]; ok {
+			present = append(present, name)
+		}
+	}
+	if len(present) == 0 {
+		return nil
+	}
+
+	if dryRun {
+		var actions []ComponentAction
+		for _, name := range present {
+			actions = append(actions, ComponentAction{
+				Component: "var:" + name,
+				Action:    "delete",
+				Detail:    fmt.Sprintf("would migrate then delete retired variable %s", name),
+			})
+			progress(repoFullName, "dry-run", fmt.Sprintf("Would migrate then delete retired variable %s", name))
+		}
+		return actions
+	}
+
+	if err := seedGitLabPollState(ctx, client, owner, repo); err != nil {
+		return []ComponentAction{{
+			Component: "poll-state",
+			Action:    "error",
+			Detail:    fmt.Sprintf("migrating retired poll-state variables into branches: %v", err),
+		}}
+	}
+
+	var actions []ComponentAction
+	for _, name := range present {
+		if err := client.DeleteRepoVariable(ctx, owner, repo, name); err != nil {
+			actions = append(actions, ComponentAction{
+				Component: "var:" + name,
+				Action:    "error",
+				Detail:    fmt.Sprintf("failed to delete retired variable %s: %v", name, err),
+			})
+			continue
+		}
+		actions = append(actions, ComponentAction{
+			Component: "var:" + name,
+			Action:    "delete",
+			Detail:    fmt.Sprintf("migrated then deleted retired variable %s", name),
+		})
+		progress(repoFullName, "sync", fmt.Sprintf("Deleted retired variable %s", name))
+	}
+	return actions
+}
+
 func requiredVarsForForge(forgeName string) []string {
 	if forgeName == ForgeGitLab {
-		return gitlabRequiredVariables
+		// GitLab poller state lives on poll-state branches, not CI/CD
+		// variables. There are no required GitLab variables.
+		return nil
 	}
 	return requiredVariables
 }

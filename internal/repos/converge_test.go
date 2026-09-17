@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 )
 
@@ -1863,22 +1864,16 @@ func TestConvergeBatchResult_Helpers(t *testing.T) {
 	}
 }
 
-func TestConverge_GitLab_SeedsMissingPollVariables(t *testing.T) {
-	fc := newFakeClientForBatch("acme/api")
-	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
-	fc.Secrets["acme/api/FULLSEND_GCP_PROJECT_ID"] = true
-	fc.Secrets["acme/api/FULLSEND_GCP_WIF_PROVIDER"] = true
-
-	m := &Manifest{
-		Version: 1,
-		GitLab: &PlatformConfig{
-			URL:         "https://gitlab.example.com",
-			FullsendRef: "v2.5.0",
-			Repos:       []RepoEntry{{Name: "acme/api"}},
+func gitlabConvergeCfg(repo string) ConvergeConfig {
+	return ConvergeConfig{
+		Manifest: &Manifest{
+			Version: 1,
+			GitLab: &PlatformConfig{
+				URL:         "https://gitlab.example.com",
+				FullsendRef: "v2.5.0",
+				Repos:       []RepoEntry{{Name: repo}},
+			},
 		},
-	}
-	cfg := ConvergeConfig{
-		Manifest:               m,
 		MaxConcurrency:         4,
 		Roles:                  []string{"triage"},
 		Direct:                 true,
@@ -1886,34 +1881,147 @@ func TestConverge_GitLab_SeedsMissingPollVariables(t *testing.T) {
 		InferenceProjectNumber: "123456789",
 		InferenceRegion:        "us-central1",
 	}
+}
 
+func populateGitLabInstalled(fc *forge.FakeClient, owner, repo string) {
+	full := owner + "/" + repo
+	fc.FileContents[full+"/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	fc.Secrets[full+"/"+forge.SecretGCPProjectID] = true
+	fc.Secrets[full+"/"+forge.SecretGCPWIFProvider] = true
+	fc.Secrets[full+"/"+forge.SecretForgeToken] = true
+	fc.PipelineSchedules[full] = []forge.PipelineSchedule{
+		{ID: 1, Description: "fullsend slash poll", Active: true},
+		{ID: 2, Description: "fullsend event poll", Active: true},
+	}
+}
+
+func TestConverge_GitLab_DoesNotSeedRetiredPollVariables(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	populateGitLabInstalled(fc, "acme", "api")
+
+	sc := &fakeScaffoldCommit{}
+	result, err := Converge(context.Background(), gitlabConvergeCfg("acme/api"), newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("unexpected failure: %v", result.Failed()[0].Error)
+	}
+
+	for _, a := range result.Results[0].Actions {
+		if a.Action == "add" && strings.HasPrefix(a.Component, "var:") {
+			name := DriftFieldName(a.Component)
+			for _, retired := range gitlabRetiredLegacyVars {
+				if name == retired {
+					t.Errorf("retired variable %s was seeded", name)
+				}
+			}
+		}
+	}
+	for _, name := range gitlabRetiredLegacyVars {
+		if _, ok := fc.VariableValues["acme/api/"+name]; ok {
+			t.Errorf("retired variable %s written to forge", name)
+		}
+	}
+}
+
+func TestConverge_GitLab_MigrateThenDeleteRetiredVars(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	populateGitLabInstalled(fc, "acme", "api")
+	for _, name := range gitlabRetiredLegacyVars {
+		val := "{}"
+		if name == forge.VarLastPollAtFast || name == forge.VarLastPollAtFull {
+			val = "2020-01-01T00:00:00Z"
+		}
+		fc.VariableValues["acme/api/"+name] = val
+	}
+
+	sc := &fakeScaffoldCommit{}
+	result, err := Converge(context.Background(), gitlabConvergeCfg("acme/api"), newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("unexpected failure: %v", result.Failed()[0].Error)
+	}
+
+	deleted := map[string]bool{}
+	for _, a := range result.Results[0].Actions {
+		if a.Action == "orphan" && strings.HasPrefix(a.Component, "var:FULLSEND_") {
+			name := DriftFieldName(a.Component)
+			for _, retired := range gitlabRetiredLegacyVars {
+				if name == retired {
+					t.Errorf("retired variable %s flagged as orphan", name)
+				}
+			}
+		}
+		if a.Action == "delete" {
+			deleted[DriftFieldName(a.Component)] = true
+		}
+	}
+	for _, name := range gitlabRetiredLegacyVars {
+		if !deleted[name] {
+			t.Errorf("expected delete action for %s", name)
+		}
+		if _, ok := fc.VariableValues["acme/api/"+name]; ok {
+			t.Errorf("retired variable %s still present on forge", name)
+		}
+	}
+	assertPollStateBranchesSeeded(t, fc, "acme", "api")
+}
+
+func TestConverge_GitLab_RetiredVarsIdempotentOnceGone(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	populateGitLabInstalled(fc, "acme", "api")
+	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", poll.PollStateBranchSlash, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+		t.Fatalf("seed slash: %v", err)
+	}
+	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", poll.PollStateBranchEvents, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	sc := &fakeScaffoldCommit{}
+	result, err := Converge(context.Background(), gitlabConvergeCfg("acme/api"), newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	for _, a := range result.Results[0].Actions {
+		if a.Action == "delete" {
+			t.Errorf("unexpected delete when retired vars are already gone: %+v", a)
+		}
+		if a.Action == "orphan" && strings.HasPrefix(a.Component, "var:") {
+			t.Errorf("unexpected orphan var action: %+v", a)
+		}
+	}
+}
+
+func TestConverge_GitLab_RetiredVarsDryRunDoesNotDelete(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	populateGitLabInstalled(fc, "acme", "api")
+	fc.VariableValues["acme/api/"+forge.VarLastPollAtFast] = "2020-01-01T00:00:00Z"
+
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.DryRun = true
 	sc := &fakeScaffoldCommit{}
 	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
 	if err != nil {
 		t.Fatalf("Converge() error: %v", err)
 	}
 
-	if len(result.Converged()) != 1 {
-		t.Fatalf("expected 1 converged repo, got %d", len(result.Converged()))
-	}
-
-	seeded := map[string]bool{}
+	found := false
 	for _, a := range result.Results[0].Actions {
-		if a.Action == "add" && strings.HasPrefix(a.Component, "var:") {
-			seeded[DriftFieldName(a.Component)] = true
+		if a.Component == "var:"+forge.VarLastPollAtFast && a.Action == "delete" {
+			found = true
+			if !strings.Contains(a.Detail, "would migrate then delete") {
+				t.Errorf("detail = %q, want dry-run wording", a.Detail)
+			}
 		}
 	}
-	for _, v := range []string{"FULLSEND_LAST_POLL_AT_FAST", "FULLSEND_LAST_POLL_AT_FULL", "FULLSEND_LABEL_STATE"} {
-		if !seeded[v] {
-			t.Errorf("expected poll variable %s to be seeded, but it was not", v)
-		}
+	if !found {
+		t.Error("expected dry-run delete action for retired var")
 	}
-
-	if val := fc.VariableValues["acme/api/FULLSEND_LAST_POLL_AT_FAST"]; val == "" {
-		t.Error("FULLSEND_LAST_POLL_AT_FAST not written to forge")
-	}
-	if val := fc.VariableValues["acme/api/FULLSEND_LABEL_STATE"]; val != "{}" {
-		t.Errorf("FULLSEND_LABEL_STATE = %q, want %q", val, "{}")
+	if fc.VariableValues["acme/api/"+forge.VarLastPollAtFast] == "" {
+		t.Error("dry-run must not delete the retired var")
 	}
 }
 

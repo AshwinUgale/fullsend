@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 )
 
 func TestCheckFileContentDrift_MatchingContent(t *testing.T) {
@@ -320,6 +321,47 @@ func TestCheckOrphanVars_GitLabSecretsNotFlagged(t *testing.T) {
 	}
 	if len(orphans) != 0 {
 		t.Errorf("expected 0 orphan vars, got %d: %v", len(orphans), orphans)
+	}
+}
+
+func TestCheckOrphanVars_GitLabRetiredVarsNotFlagged(t *testing.T) {
+	fc := forge.NewFakeClient()
+	for _, name := range gitlabRetiredLegacyVars {
+		fc.VariableValues["owner/repo/"+name] = "leftover"
+	}
+	fc.VariableValues["owner/repo/"+forge.SecretDispatch] = "dispatch-secret"
+
+	cfg := InstallConfig{Forge: ForgeGitLab}
+	orphans, err := CheckOrphanVars(
+		context.Background(), fc, "owner", "repo",
+		cfg, "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Errorf("retired vars must not be flagged as orphans, got %d: %v", len(orphans), orphans)
+	}
+}
+
+func TestCheckOrphanFiles_GitLabPollStateBranchesNotScaffoldPaths(t *testing.T) {
+	for _, branch := range gitlabPollStateBranches {
+		for _, p := range ScaffoldPathsForForge(ForgeGitLab) {
+			if p == branch {
+				t.Errorf("poll-state branch %q must not be a managed scaffold path", branch)
+			}
+		}
+		for _, p := range GitLabForgeConfig().WorkflowPaths {
+			if p == branch {
+				t.Errorf("poll-state branch %q must not be a workflow path", branch)
+			}
+		}
+		if branch != poll.PollStateBranchSlash && branch != poll.PollStateBranchEvents {
+			t.Errorf("unexpected managed poll-state branch %q", branch)
+		}
+	}
+	if len(gitlabPollStateBranches) != 2 {
+		t.Errorf("gitlabPollStateBranches = %d, want 2", len(gitlabPollStateBranches))
 	}
 }
 

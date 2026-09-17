@@ -9,6 +9,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 )
 
 func newTestManifest() *Manifest {
@@ -111,6 +112,81 @@ func TestProbeRepoState_ProbeError(t *testing.T) {
 	}
 	if state.Installed {
 		t.Fatal("Installed = true, want false when probe fails")
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaForgeToken(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	fc.Secrets["acme/api/"+forge.SecretForgeToken] = true
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (GitLab forge token)")
+	}
+	if state.FullsendRef != "v2.5.0" {
+		t.Errorf("FullsendRef = %q, want v2.5.0", state.FullsendRef)
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaSchedule(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	fc.PipelineSchedules["acme/api"] = []forge.PipelineSchedule{
+		{ID: 1, Description: "fullsend slash poll", Active: true},
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (GitLab schedule)")
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaPollStateBranch(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", poll.PollStateBranchSlash, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+		t.Fatalf("seed slash: %v", err)
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (poll-state branch)")
+	}
+}
+
+func TestProbeRepoState_GitLab_NotInstalled(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false when GitLab has only a workflow file")
+	}
+}
+
+func TestProbeRepoState_GitLab_PollStateBranchError(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.Errors["GetFileContentAtRef"] = fmt.Errorf("api down")
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err == nil {
+		t.Fatal("expected error when poll-state branch check fails")
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false when poll-state check errors")
 	}
 }
 
