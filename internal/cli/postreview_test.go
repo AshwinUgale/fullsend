@@ -1320,6 +1320,27 @@ func TestSanitizeReviewResult_RedactsSecretsInSeverityAndCategory(t *testing.T) 
 	assert.NotContains(t, sanitized.Findings[0].Category, "ghp_FAKEtest", "secret should be redacted from finding category")
 }
 
+func TestSanitizeReviewResult_RedactsSecretsInFile(t *testing.T) {
+	printer := ui.New(io.Discard)
+	secret := "ghp_000000000000000000000000000000000000"
+	r := ReviewResult{
+		Body:   "Review body without secrets.",
+		Action: "request-changes",
+		Findings: []ReviewFinding{
+			{
+				Severity:    "high",
+				Category:    "security",
+				File:        "main.go " + secret,
+				Line:        10,
+				Description: "Clean description.",
+			},
+		},
+	}
+
+	sanitized := sanitizeReviewResult(r, printer)
+	assert.NotContains(t, sanitized.Findings[0].File, secret, "secret should be redacted from finding file path")
+}
+
 func TestSanitizeReviewResult_ZeroWidthObfuscatedSecret(t *testing.T) {
 	printer := ui.New(io.Discard)
 	plain := "ghp_FAKEtesttoken000000000000000000000000"
