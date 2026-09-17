@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -10,6 +11,10 @@ import (
 // embeds in MR notes to signal the fix stage. Aliased from forge so
 // GitLab note posting, poller retention, and routing stay in lockstep.
 const changesRequestedMarker = forge.ChangesRequestedMarker
+
+// noFixLabel suppresses bot-triggered fix dispatch, matching GitHub's
+// check-fix-eligibility.sh. Applied by /fs-fix-stop; see docs/agents/fix.md.
+const noFixLabel = "fullsend-no-fix"
 
 // HarnessRouter implements EventRouter by applying the default routing
 // rules from ADR 0067's event routing table. Slash commands (/fs-X)
@@ -75,6 +80,15 @@ func (r *HarnessRouter) routeComment(event *NormalizedEvent) ([]string, error) {
 			return nil, nil
 		}
 		if !r.validAgents["fix"] {
+			return nil, nil
+		}
+		// fullsend-no-fix suppresses bot-triggered fix runs, matching
+		// GitHub's check-fix-eligibility.sh gate. GitHub also requires
+		// a fullsend-fix opt-in label for non-coder-bot/human-authored
+		// PRs; State does not yet carry enough MR-author identity to
+		// replicate that half of the gate for GitLab, so it is deferred
+		// (see docs/agents/fix.md Control labels section).
+		if slices.Contains(event.State.Labels, noFixLabel) {
 			return nil, nil
 		}
 		return []string{"fix"}, nil

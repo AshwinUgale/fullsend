@@ -145,12 +145,23 @@ automatic (bot-triggered) runs.
 further bot-triggered fix runs. Human-triggered `/fs-fix` commands still work.
 Remove the label or use `/fs-fix` to re-engage.
 
+**GitLab scope note:** on GitLab, the dispatch router enforces the
+`fullsend-no-fix` stop valve for the changes-requested MR-note path
+described above. The `fullsend-fix` opt-in gate for human-authored and
+non-coder-bot MRs — enforced on GitHub by
+[`check-fix-eligibility.sh`](../../.github/scripts/check-fix-eligibility.sh) —
+is not yet implemented for GitLab: the router does not currently have
+enough MR-author identity information to distinguish the fullsend code
+agent from other authors. Until that parity lands, bot-triggered fix
+runs on GitLab MRs are gated only by `fullsend-no-fix`, not by
+`fullsend-fix`.
+
 ## Control labels
 
 | Label | Meaning |
 |-------|---------|
-| `fullsend-fix` | Enables automatic bot-triggered fix runs on human-authored PRs and PRs from bots other than the fullsend code agent. Without this label, the fix agent only runs when explicitly invoked via `/fs-fix`. PRs authored by `fullsend-ai-coder[bot]` are always eligible without this label. |
-| `fullsend-no-fix` | Prevents bot-triggered fix runs on this PR. Applied by `/fs-fix-stop`. Human `/fs-fix` commands are unaffected. Takes priority over `fullsend-fix`. |
+| `fullsend-fix` | Enables automatic bot-triggered fix runs on human-authored PRs and PRs from bots other than the fullsend code agent. Without this label, the fix agent only runs when explicitly invoked via `/fs-fix`. PRs authored by `fullsend-ai-coder[bot]` are always eligible without this label. **GitLab:** not yet enforced — see the scope note above. |
+| `fullsend-no-fix` | Prevents bot-triggered fix runs on this PR. Applied by `/fs-fix-stop`. Human `/fs-fix` commands are unaffected. Takes priority over `fullsend-fix`. Enforced on both GitHub and GitLab. |
 | `needs-human` | The fix agent is approaching its iteration cap and needs human direction. Applied automatically when a bot-triggered fix iteration reaches the warning threshold. |
 
 ## Configuration and extension

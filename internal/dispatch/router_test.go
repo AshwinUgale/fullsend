@@ -305,6 +305,54 @@ func TestHarnessRouter_ChangesRequestedMarker(t *testing.T) {
 	}
 }
 
+func TestHarnessRouter_ChangesRequestedNoFixLabelBlocked(t *testing.T) {
+	r := NewHarnessRouter([]string{"fix", "review"})
+
+	event := &NormalizedEvent{
+		Entity: Entity{Kind: "change_proposal", ID: 10},
+		Transition: Transition{Kind: "comment_added", Comment: &TransitionComment{
+			Body: "Changes needed " + forge.ChangesRequestedMarker + " please fix",
+		}},
+		Actor: Actor{ID: "bot", Kind: "bot", Role: "write"},
+		State: State{
+			Labels:         []string{"fullsend-no-fix"},
+			ChangeProposal: &ChangeProposalState{IsFork: false},
+		},
+	}
+
+	stages, err := r.Route(event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stages) != 0 {
+		t.Fatalf("expected no stages when fullsend-no-fix label is present, got %v", stages)
+	}
+}
+
+func TestHarnessRouter_ChangesRequestedOtherLabelsAllowed(t *testing.T) {
+	r := NewHarnessRouter([]string{"fix", "review"})
+
+	event := &NormalizedEvent{
+		Entity: Entity{Kind: "change_proposal", ID: 10},
+		Transition: Transition{Kind: "comment_added", Comment: &TransitionComment{
+			Body: "Changes needed " + forge.ChangesRequestedMarker + " please fix",
+		}},
+		Actor: Actor{ID: "bot", Kind: "bot", Role: "write"},
+		State: State{
+			Labels:         []string{"fullsend-fix", "some-other-label"},
+			ChangeProposal: &ChangeProposalState{IsFork: false},
+		},
+	}
+
+	stages, err := r.Route(event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stages) != 1 || stages[0] != "fix" {
+		t.Fatalf("expected [fix] when fullsend-no-fix is absent, got %v", stages)
+	}
+}
+
 func TestHarnessRouter_CommentOnlyReviewDoesNotDispatchFix(t *testing.T) {
 	r := NewHarnessRouter([]string{"fix", "review"})
 
