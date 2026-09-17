@@ -5805,7 +5805,8 @@ func TestRemintAgentTokenForPostScript_PostScriptEnvUsesFreshToken(t *testing.T)
 	}
 	assert.Equal(t, "ghs_original_token", h.RunnerEnv["PUSH_TOKEN"])
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 
 	env := postScriptEnv(h, "")
 	assert.Equal(t, 2, calls)
@@ -5857,7 +5858,8 @@ func TestRemintAgentTokenForPostScript_UsesPostScriptPrivilegeLevel(t *testing.T
 			"PUSH_TOKEN": os.Getenv("PUSH_TOKEN"),
 		},
 	}
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "read", printer)
+	require.NoError(t, remintErr)
 	defer remintCleanup()
 
 	require.Equal(t, []string{"read", "write"}, levels)
@@ -6020,7 +6022,8 @@ func TestRemintAgentTokenForPostScript_SurvivesCancelledParentCtx(t *testing.T) 
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	remintCleanup := remintAgentTokenForPostScript(cancelledCtx, h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(cancelledCtx, h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer remintCleanup()
 
 	assert.Equal(t, 1, calls, "remint must still call mint despite an already-cancelled parent ctx")
@@ -6055,7 +6058,8 @@ func TestRemintAgentTokenForPostScript_DeadlineExceededGetsDistinctWarning(t *te
 	var buf bytes.Buffer
 	printer := ui.New(&buf)
 
-	cleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer cleanup()
 
 	assert.Contains(t, buf.String(), "timed out", "a context.DeadlineExceeded must produce a distinct message from a generic mint failure")
@@ -6095,7 +6099,8 @@ func TestRemintAgentTokenForPostScript_ErrorIsNonFatal(t *testing.T) {
 		},
 	}
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr, "a same-level remint failure must stay non-fatal")
 	defer remintCleanup()
 
 	assert.Equal(t, 2, calls)
@@ -6114,6 +6119,68 @@ func TestRemintAgentTokenForPostScript_ErrorIsNonFatal(t *testing.T) {
 	got, readErr := os.ReadFile(marker)
 	require.NoError(t, readErr)
 	assert.Equal(t, "ghs_original_token\n", string(got))
+}
+
+// TestRemintAgentTokenForPostScript_DowngradeErrorIsFatal covers the
+// privilege-escalation case a plain non-fatal remint failure would allow: a
+// harness author configuring the post-script stage at a strictly lower
+// privilege level than the runtime stage (runtime: write, post_script:
+// read). A remint failure there must not silently leave the more-privileged
+// runtime-stage token active for the post-script — it must be reported as
+// an error so the caller can fail the run instead of running the
+// post-script at all.
+func TestRemintAgentTokenForPostScript_DowngradeErrorIsFatal(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return nil, fmt.Errorf("mint rejected read level")
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:    "write",
+			harness.PrivilegeStagePostScript: "read",
+		},
+	}
+	printer := ui.New(io.Discard)
+
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.Error(t, remintErr, "a remint failure that would leave a more-privileged leftover token active must be fatal")
+	assert.Contains(t, remintErr.Error(), "mint rejected read level")
+	cleanup()
+}
+
+// TestRemintAgentTokenForPostScript_UnrankedCustomLevelStaysNonFatal covers
+// a custom privilege level name (neither read, write, nor admin): its
+// relative rank against the active level cannot be determined, so a remint
+// failure must fall back to the existing non-fatal behavior rather than
+// guessing.
+func TestRemintAgentTokenForPostScript_UnrankedCustomLevelStaysNonFatal(t *testing.T) {
+	origMint := statusMintToken
+	defer func() { statusMintToken = origMint }()
+
+	statusMintToken = func(_ context.Context, _ mintclient.MintRequest) (*mintclient.MintResult, error) {
+		return nil, fmt.Errorf("mint rejected custom level")
+	}
+
+	t.Setenv("REPO_FULL_NAME", "org/my-repo")
+	h := &harness.Harness{
+		Role: "coder",
+		PrivilegeLevels: map[string]string{
+			harness.PrivilegeStageRuntime:    "write",
+			harness.PrivilegeStagePostScript: "custom-level",
+		},
+	}
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr, "an unranked custom level cannot be proven a downgrade, so it must stay non-fatal")
+	assert.Contains(t, buf.String(), "Failed to refresh agent token for post-script")
+	cleanup()
 }
 
 // TestRemintAgentTokenForPostScript_SkipsMintOnGitLabOrEmptyMintURL covers
@@ -6149,7 +6216,8 @@ func TestRemintAgentTokenForPostScript_SkipsMintOnGitLabOrEmptyMintURL(t *testin
 				},
 			}
 
-			cleanup := remintAgentTokenForPostScript(context.Background(), h, tc.mintURL, tc.forgePlatform, printer)
+			cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, tc.mintURL, tc.forgePlatform, "write", printer)
+			require.NoError(t, remintErr)
 			cleanup()
 
 			assert.Equal(t, 0, calls, "gitlab/empty mint URL must not call mint")
@@ -6188,7 +6256,8 @@ func TestRemintAgentTokenForPostScript_RunnerEnvMissingTokenKeys(t *testing.T) {
 		RunnerEnv: map[string]string{"UNRELATED_VAR": "keep-me"},
 	}
 
-	remintCleanup := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", printer)
+	remintCleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
+	require.NoError(t, remintErr)
 	defer remintCleanup()
 
 	assert.Equal(t, 1, calls)

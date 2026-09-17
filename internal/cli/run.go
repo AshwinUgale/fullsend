@@ -1602,12 +1602,35 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 	// ends here — before sandbox creation.
 	var preResult prescript.Result
 	if h.PreScript != "" {
+		// maybeRemintAgentTokenForStage (and preRestore below) may
+		// os.Setenv/os.Unsetenv token env vars; a still-running OpenAI
+		// credential refresher goroutine concurrently calls os.Getenv via
+		// resolveOpenAICredential, which mintAgentTokenAtLevel's own doc
+		// comment requires not racing. The post-script remint path already
+		// stops refreshers first for the same reason; do the same here
+		// around both Setenv-performing calls, restarting them in between
+		// (and after) so the sandbox stage that follows still gets
+		// credential refresh.
+		for _, stop := range stopOpenAIRefreshers {
+			stop()
+		}
 		preRestore, remintErr := maybeRemintAgentTokenForStage(ctx, h, mintURL, forgePlatform, harness.PrivilegeStagePreScript, runtimeLevel, printer)
+		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
+		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
 		if remintErr != nil {
 			return fmt.Errorf("agent token minting for pre-script failed: %w", remintErr)
 		}
 		preResult, err = runPreScript(h, runDir, traceparent, printer)
+		for _, stop := range stopOpenAIRefreshers {
+			stop()
+		}
 		preRestore()
+		stopOpenAIRefreshers = startOpenAIRefreshers(openAIHandles, printer)
+		for _, stop := range stopOpenAIRefreshers {
+			defer stop()
+		}
 		if err != nil {
 			return err
 		}
@@ -1741,7 +1764,9 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// Re-mint after sandbox teardown so the post-script does not
 			// authenticate with an installation token that expired during a
 			// full-budget run. GitHub App tokens live 60 minutes, matching the
-			// code agent's budget (#7231). A remint failure is non-fatal.
+			// code agent's budget (#7231). A remint failure is usually
+			// non-fatal, but see remintAgentTokenForPostScript's doc for the
+			// privilege-downgrade case it fails closed on instead.
 			// os.Setenv is safe here: sandbox streaming and OIDC refresh
 			// goroutines have already been torn down (LIFO defers). The
 			// OpenAI credential refreshers are the exception — their own
@@ -1756,8 +1781,18 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			// + remintForPostScriptTimeout — see its doc), so the run's own
 			// ctx is passed through unwrapped here. That keeps the
 			// cancellation-survival behavior testable in isolation instead
-			// of only reachable through this closure.
-			remintCleanup := remintAgentTokenForPostScript(ctx, h, mintURL, forgePlatform, printer)
+			// of only reachable through this closure. runtimeLevel is the
+			// privilege level of the token still in the process env at this
+			// point (the pre-script stage, if any, restores it via
+			// preRestore before this defer ever runs).
+			remintCleanup, remintErr := remintAgentTokenForPostScript(ctx, h, mintURL, forgePlatform, runtimeLevel, printer)
+			if remintErr != nil {
+				printer.StepFail("Post-script token refresh failed: " + remintErr.Error())
+				if runErr == nil {
+					runErr = fmt.Errorf("agent token minting for post-script failed: %w", remintErr)
+				}
+				return
+			}
 			defer remintCleanup()
 			postCmd := exec.Command(h.PostScript)
 			postCmd.Dir = runDir
@@ -5158,9 +5193,20 @@ var roleTokenVars = map[string][]tokenVar{
 // code agent's budget, so a full-budget run's original token is already
 // expired by post-script time (#7231). GitLab is skipped (no App mint).
 //
-// A remint failure is non-fatal: the post-script still runs with the
-// existing token. The returned cleanup restores process env after the
-// post-script; it is a no-op when remint is skipped or fails.
+// A remint failure is usually non-fatal: the post-script still runs with
+// the existing token (the runtime-stage token already in the process
+// environment). currentLevel is that token's privilege level. The
+// exception is a harness author who configured the post-script stage at a
+// strictly lower privilege level than currentLevel (e.g. runtime: write,
+// post_script: read): leaving the more-privileged leftover token active
+// for the post-script in that case would be a privilege escalation
+// relative to the explicit configuration, so a remint failure is treated
+// as fatal instead — the returned error is non-nil and the post-script
+// must not run. Only the built-in read/write/admin levels can be ranked
+// (mintcore.PermissionLevelAtLeast); a custom level name outside that set
+// falls back to the non-fatal behavior. The returned cleanup restores
+// process env after the post-script; it is a no-op when remint is
+// skipped, fails non-fatally, or fails fatally.
 //
 // ctx is the caller's own run ctx, not yet bounded or decoupled from
 // cancellation — remintAgentTokenForPostScript does that itself (rather
@@ -5171,9 +5217,9 @@ var roleTokenVars = map[string][]tokenVar{
 // context.WithoutCancel pattern elsewhere in this file. Wrapping inside
 // the function, instead of at the call site, also means a test can pass
 // an already-cancelled ctx directly and still observe the remint run.
-func remintAgentTokenForPostScript(ctx context.Context, h *harness.Harness, mintURL, forgePlatform string, printer *ui.Printer) func() {
+func remintAgentTokenForPostScript(ctx context.Context, h *harness.Harness, mintURL, forgePlatform, currentLevel string, printer *ui.Printer) (func(), error) {
 	if forgePlatform == "gitlab" || mintURL == "" {
-		return func() {}
+		return func() {}, nil
 	}
 	remintCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remintForPostScriptTimeout)
 	defer cancel()
@@ -5185,6 +5231,14 @@ func remintAgentTokenForPostScript(ctx context.Context, h *harness.Harness, mint
 	}
 	_, cleanup, err := mintAgentTokenAtLevel(remintCtx, role, mintURL, forgePlatform, level, printer)
 	if err != nil {
+		if level != currentLevel && mintcore.PermissionLevelAtLeast(currentLevel, level) {
+			// currentLevel outranks the configured post-script level: the
+			// leftover runtime-stage token is more privileged than the
+			// harness author asked for. Fail the run rather than silently
+			// hand the post-script a token it was explicitly not supposed
+			// to have.
+			return func() {}, fmt.Errorf("refreshing agent token for post-script at configured level %q (active level %q is more privileged): %w", level, currentLevel, err)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			// Distinct from a genuine mint rejection: the client's own
 			// retry schedule (see mintclient.MaxMintDuration) did not get
@@ -5194,13 +5248,13 @@ func remintAgentTokenForPostScript(ctx context.Context, h *harness.Harness, mint
 		} else {
 			printer.StepWarn("Failed to refresh agent token for post-script: " + err.Error() + "; continuing with existing token")
 		}
-		return func() {}
+		return func() {}, nil
 	}
 	syncRunnerEnvTokens(h)
 	if cleanup == nil {
-		return func() {}
+		return func() {}, nil
 	}
-	return cleanup
+	return cleanup, nil
 }
 
 // syncRunnerEnvTokens copies the current process-env token vars into
