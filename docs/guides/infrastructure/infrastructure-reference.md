@@ -367,14 +367,18 @@ are folded in when present (`*Fast` → slash, `*Full` + `LabelState` →
 events); otherwise each branch is an empty signed baseline. Existing
 branch documents are not overwritten.
 
-**Legacy, install-provisioned CI/CD variables (#7343 phase 2):** the
-following seven variables may still be provisioned by install for
-older repos, but the poller no longer reads or writes any of them via
-`GetCIVariable`/`UpdateCIVariable`. Poll state (watermarks, label sync
-state, dispatched/failed-key dedup) now lives in a single HMAC-signed
-`state.json` document per poll mode, committed to two dedicated,
-unprotected branches (`fullsend-poll-state-slash` and
-`fullsend-poll-state-events`) rather than CI/CD variables. The
+**Retired poll-state CI/CD variables (#7343 phase 3b / #7380):** the
+following seven variables are no longer seeded at install. `repos
+converge` migrates any still-present values into the poll-state
+branches (`*Fast` → slash, `*Full` + `LabelState` → events) and then
+deletes the variables. The orphan detector treats them as known-retired,
+so already-installed repos do not emit spurious orphan-variable warnings
+during the transition. The two poll-state branches are managed git refs
+and are never reported as orphan files. The poller no longer reads or
+writes any of these variables via `GetCIVariable`/`UpdateCIVariable`.
+Poll state (watermarks, label sync state, dispatched/failed-key dedup)
+lives in a single HMAC-signed `state.json` document per poll mode on
+`fullsend-poll-state-slash` and `fullsend-poll-state-events`. The
 signature reuses `FULLSEND_DISPATCH_SECRET` with per-branch,
 per-project domain separation, so the poller can run at Developer
 access instead of Maintainer. See ADR 0067.

@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -68,7 +67,7 @@ type ConvergeConfig struct {
 // installation component during convergence.
 type ComponentAction struct {
 	Component string // e.g., "workflow", "thin-caller:<path>", "var:MINT_URL", "schedule:<name>", "ref"
-	Action    string // "none", "add", "update", "upgrade", "orphan", "error"
+	Action    string // "none", "add", "update", "upgrade", "delete", "orphan", "error"
 	Detail    string // human-readable detail
 }
 
@@ -581,6 +580,15 @@ func convergeRepo(ctx context.Context,
 	varActions := convergeVariables(ctx, resolved, d.components, cfg.DryRun, progress)
 	cr.Actions = append(cr.Actions, varActions...)
 
+	// 2a-ii: GitLab retired poll-state CI/CD vars. Migrate leftover
+	// values into poll-state branches, then delete the vars. Known-
+	// retired: CheckOrphanVars will not warn about them.
+	if resolved.Forge == ForgeGitLab {
+		retireActions := retireGitLabLegacyVars(ctx, resolved.ForgeConfig.Client,
+			resolved.Owner, resolved.Repo, cfg.DryRun, progress)
+		cr.Actions = append(cr.Actions, retireActions...)
+	}
+
 	// 2b: Converge secrets (existence-only — values cannot be read back).
 	secretActions := convergeSecrets(ctx, resolved, d.components, hasSecrets,
 		wifProvider, cfg, progress)
@@ -773,12 +781,7 @@ func convergeVariables(ctx context.Context,
 		varName := DriftFieldName(c.Name)
 		expected := c.Expected
 		if expected == "" {
-			if !c.Present {
-				expected = initialVarValue(varName)
-			}
-			if expected == "" {
-				continue
-			}
+			continue
 		}
 
 		if dryRun {
@@ -817,23 +820,6 @@ func convergeVariables(ctx context.Context,
 	}
 
 	return actions
-}
-
-// initialVarValue returns a seed value for required variables that have
-// no expected value from the probe. This handles the case where a repo
-// has pre-seeded secrets but is missing poll variables — converge needs
-// to write initial values so the poll loop can start.
-func initialVarValue(varName string) string {
-	switch varName {
-	case forge.VarLastPollAtFast, forge.VarLastPollAtFull:
-		return time.Now().UTC().Format(time.RFC3339)
-	case forge.VarLabelState,
-		forge.VarDispatchedKeysFast, forge.VarDispatchedKeysFull,
-		forge.VarFailedKeysFast, forge.VarFailedKeysFull:
-		return "{}"
-	default:
-		return ""
-	}
 }
 
 // convergeSecrets checks and repairs missing inference secrets.

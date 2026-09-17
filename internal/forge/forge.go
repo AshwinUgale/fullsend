@@ -32,7 +32,9 @@ const (
 	VarGCPRegion      = "FULLSEND_GCP_REGION"
 	VarReviewClientID = "FULLSEND_REVIEW_CLIENT_ID"
 
-	// Managed variables — GitLab.
+	// Retired GitLab poller state variables. Superseded by HMAC-signed
+	// state.json on fullsend-poll-state-slash / fullsend-poll-state-events.
+	// Install no longer seeds them; converge migrate-then-deletes them.
 	VarLastPollAtFast     = "FULLSEND_LAST_POLL_AT_FAST"
 	VarLastPollAtFull     = "FULLSEND_LAST_POLL_AT_FULL"
 	VarLabelState         = "FULLSEND_LABEL_STATE"

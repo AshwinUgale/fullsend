@@ -30,25 +30,34 @@ func ProbeRepoState(ctx context.Context, client forge.Client, owner, repo, forge
 		return RepoState{}, fmt.Errorf("probing components for %s/%s: %w", owner, repo, err)
 	}
 
-	// Check required variables — these distinguish per-repo from per-org.
-	hasRequiredVar := false
+	// Check required components — these distinguish per-repo from per-org.
+	// GitHub uses FULLSEND_MINT_URL. GitLab poller state no longer lives
+	// in CI/CD variables, so install evidence is the bot token or a poll
+	// schedule. Poll-state branch presence alone is deliberately not
+	// treated as install evidence: uninstall deletes the bot token and
+	// pipeline schedules but does not yet delete the poll-state branches
+	// (deferred to #7381), so a leftover branch from a prior install
+	// would otherwise misclassify an uninstalled repo as installed.
+	hasRequiredComponent := false
 	state := RepoState{}
 	for _, c := range components {
 		if !c.Present {
 			continue
 		}
-		switch c.Name {
-		case "var:" + forge.VarMintURL:
-			hasRequiredVar = true
+		switch {
+		case c.Name == "var:"+forge.VarMintURL:
+			hasRequiredComponent = true
 			state.MintURL = c.Actual
-		case "var:" + forge.VarLastPollAtFast, "var:" + forge.VarLastPollAtFull, "var:" + forge.VarLabelState:
-			hasRequiredVar = true
-		case "workflow":
+		case c.Name == "secret:"+forge.SecretForgeToken:
+			hasRequiredComponent = true
+		case strings.HasPrefix(c.Name, "schedule:"):
+			hasRequiredComponent = true
+		case c.Name == "workflow":
 			state.FullsendRef = c.Actual
 		}
 	}
 
-	if !hasRequiredVar {
+	if !hasRequiredComponent {
 		return RepoState{}, nil
 	}
 	state.Installed = true

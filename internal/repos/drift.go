@@ -166,7 +166,10 @@ type OrphanVar struct {
 // CheckOrphanVars lists all repository variables on the forge and returns
 // those with the FULLSEND_ prefix that are not in the managed variable set
 // for the given forge. These are orphan variables — leftover from a
-// previous installation or a removed feature.
+// previous installation or a removed feature. GitLab retired poll-state
+// variables (gitlabRetiredLegacyVars) are known-retired: they are not
+// reported as orphans so already-installed repos do not warn during the
+// migrate-then-delete transition.
 //
 // The managed set is computed using the FULL superset of possible
 // managed variables — conditional fields (InferenceRegion,
@@ -207,6 +210,9 @@ func CheckOrphanVars(ctx context.Context, client forge.Client,
 	// existing installs incomplete solely because the secret is new.
 	if cfg.Forge == ForgeGitLab {
 		managedNames[forge.SecretDispatch] = true
+		for _, name := range gitlabRetiredLegacyVars {
+			managedNames[name] = true
+		}
 	}
 
 	forgeVars, err := client.ListRepoVariables(ctx, owner, repo)

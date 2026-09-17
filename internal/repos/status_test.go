@@ -9,6 +9,7 @@ import (
 
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 )
 
 func newTestManifest() *Manifest {
@@ -111,6 +112,93 @@ func TestProbeRepoState_ProbeError(t *testing.T) {
 	}
 	if state.Installed {
 		t.Fatal("Installed = true, want false when probe fails")
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaForgeToken(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	fc.Secrets["acme/api/"+forge.SecretForgeToken] = true
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (GitLab forge token)")
+	}
+	if state.FullsendRef != "v2.5.0" {
+		t.Errorf("FullsendRef = %q, want v2.5.0", state.FullsendRef)
+	}
+}
+
+func TestProbeRepoState_GitLab_InstalledViaSchedule(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	fc.PipelineSchedules["acme/api"] = []forge.PipelineSchedule{
+		{ID: 1, Description: "fullsend slash poll", Active: true},
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if !state.Installed {
+		t.Fatal("Installed = false, want true (GitLab schedule)")
+	}
+}
+
+func TestProbeRepoState_GitLab_PollStateBranchAlone_NotInstalled(t *testing.T) {
+	// Poll-state branch presence alone must not be treated as install
+	// evidence: uninstall does not yet delete these branches (#7381), so
+	// branch-only evidence would misclassify an uninstalled repo.
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", poll.PollStateBranchSlash, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+		t.Fatalf("seed slash: %v", err)
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false (poll-state branch alone is not sufficient evidence)")
+	}
+}
+
+func TestProbeRepoState_GitLab_PostUninstall_NotInstalled(t *testing.T) {
+	// Simulates the state immediately after uninstall: the bot token and
+	// pipeline schedules are gone (uninstall deletes them), but the
+	// poll-state branches remain (branch deletion deferred to #7381).
+	// This must not be classified as installed.
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	for _, branch := range gitlabPollStateBranches {
+		if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", branch, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+			t.Fatalf("seed %s: %v", branch, err)
+		}
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false (post-uninstall: token and schedules gone, only leftover branches remain)")
+	}
+}
+
+func TestProbeRepoState_GitLab_NotInstalled(t *testing.T) {
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false when GitLab has only a workflow file")
 	}
 }
 
