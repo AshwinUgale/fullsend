@@ -401,6 +401,12 @@ func (c *LiveClient) CreateBranchFromSHA(ctx context.Context, owner, repo, branc
 	return nil
 }
 
+// DeleteBranch deletes a git branch. Returns forge.ErrNotFound (wrapped)
+// if the branch does not exist.
+func (c *LiveClient) DeleteBranch(ctx context.Context, owner, repo, branchName string) error {
+	return c.DeleteRef(ctx, owner, repo, "heads/"+branchName)
+}
+
 // DeleteRef deletes a git ref via the GitLab Branches or Tags API.
 // refPath must be in the form "heads/<branch>" or "tags/<tag>".
 // Returns forge.ErrNotFound (wrapped) if the ref does not exist.

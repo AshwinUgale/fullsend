@@ -225,8 +225,15 @@ type ChangeProposal struct {
 	Title  string
 	Number int
 	Head   string
-	Base   string
-	Author string // login of the user who opened the PR/MR
+	// HeadRepo identifies the repository the head branch lives in, as
+	// "owner/repo" on both GitHub and GitLab (GitLab resolves a fork's
+	// numeric source project ID to its path_with_namespace). Empty when
+	// the forge doesn't report it (e.g. a deleted fork). Used to tell a
+	// same-named branch in an unrelated fork apart from one in the repo
+	// actually being checked, since Head alone is just a bare ref name.
+	HeadRepo string
+	Base     string
+	Author   string // login of the user who opened the PR/MR
 }
 
 // PullRequestInfo carries branch/repo context for dispatch enrichment.
@@ -609,6 +616,15 @@ type Client interface {
 	// Returns forge.ErrAlreadyExists if the branch already exists,
 	// and forge.ErrForbidden on insufficient permissions.
 	CreateBranchFromSHA(ctx context.Context, owner, repo, branchName, sha string) error
+
+	// DeleteBranch deletes the named git branch.
+	// Returns forge.ErrNotFound if the branch does not exist.
+	//
+	// This is a destructive operation. Callers must verify ownership
+	// or authorization at the call site before invoking it, especially
+	// when the branch name is predictable (for example
+	// fullsend/scaffold-install).
+	DeleteBranch(ctx context.Context, owner, repo, branchName string) error
 
 	// DeleteRef deletes a git ref (e.g., "heads/my-branch", "tags/v1.0").
 	// Returns forge.ErrNotFound if the ref does not exist.

@@ -23,6 +23,7 @@ func NewFakeClient() *FakeClient {
 		DirContents:           make(map[string][]DirectoryEntry),
 		FileContentsRef:       make(map[string][]byte),
 		BranchRefs:            make(map[string]string),
+		ExistingBranches:      make(map[string]bool),
 		Refs:                  make(map[string]string),
 		ProtectedBranches:     make(map[string]bool),
 		PipelineSchedules:     make(map[string][]PipelineSchedule),
@@ -223,6 +224,11 @@ type FakeClient struct {
 	// Always 1 after a successful ForceCommitFileToBranch.
 	ForceReachableCommits map[string]int
 
+	// ExistingBranches, when set, makes CreateBranch and CreateBranchFromSHA
+	// return ErrAlreadyExists for those keys ("owner/repo/branch").
+	// DeleteBranch removes the matching key so a subsequent create succeeds.
+	ExistingBranches map[string]bool
+
 	// Branch refs for GetBranchRef.
 	BranchRefs map[string]string // key: "owner/repo/branch" → commit SHA
 
@@ -296,6 +302,7 @@ type FakeClient struct {
 	CreatedFiles            []FileRecord
 	CreatedBranches         []string // "owner/repo/branch"
 	CreatedBranchSHAs       []BranchSHARecord
+	DeletedBranches         []string // "owner/repo/branch"
 	DeletedRefs             []string // "owner/repo/refPath"
 	CreatedProposals        []ChangeProposal
 	DeletedRepos            []string // "owner/repo"
@@ -908,7 +915,12 @@ func (f *FakeClient) CreateBranch(_ context.Context, owner, repo, branchName str
 		return e
 	}
 
-	f.CreatedBranches = append(f.CreatedBranches, owner+"/"+repo+"/"+branchName)
+	key := owner + "/" + repo + "/" + branchName
+	if f.ExistingBranches[key] {
+		return fmt.Errorf("%w: branch %s", ErrAlreadyExists, branchName)
+	}
+
+	f.CreatedBranches = append(f.CreatedBranches, key)
 	return nil
 }
 
@@ -925,10 +937,29 @@ func (f *FakeClient) CreateBranchFromSHA(_ context.Context, owner, repo, branchN
 		return e
 	}
 
-	f.CreatedBranches = append(f.CreatedBranches, owner+"/"+repo+"/"+branchName)
+	key := owner + "/" + repo + "/" + branchName
+	if f.ExistingBranches[key] {
+		return fmt.Errorf("%w: branch %s", ErrAlreadyExists, branchName)
+	}
+
+	f.CreatedBranches = append(f.CreatedBranches, key)
 	f.CreatedBranchSHAs = append(f.CreatedBranchSHAs, BranchSHARecord{
 		Owner: owner, Repo: repo, Branch: branchName, SHA: sha,
 	})
+	return nil
+}
+
+func (f *FakeClient) DeleteBranch(_ context.Context, owner, repo, branchName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if e := f.err("DeleteBranch"); e != nil {
+		return e
+	}
+
+	key := owner + "/" + repo + "/" + branchName
+	f.DeletedBranches = append(f.DeletedBranches, key)
+	delete(f.ExistingBranches, key)
 	return nil
 }
 

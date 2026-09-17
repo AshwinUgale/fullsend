@@ -209,6 +209,55 @@ func TestFakeClient_CreateBranch(t *testing.T) {
 	assert.Equal(t, []string{"owner/repo/feature-branch"}, fc.CreatedBranches)
 }
 
+func TestFakeClient_DeleteBranch(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("records deletion and clears ExistingBranches", func(t *testing.T) {
+		fc := NewFakeClient()
+		fc.ExistingBranches["owner/repo/feature-branch"] = true
+
+		err := fc.DeleteBranch(ctx, "owner", "repo", "feature-branch")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"owner/repo/feature-branch"}, fc.DeletedBranches)
+		assert.False(t, fc.ExistingBranches["owner/repo/feature-branch"])
+
+		// Subsequent create should succeed now that the branch was deleted.
+		err = fc.CreateBranch(ctx, "owner", "repo", "feature-branch")
+		require.NoError(t, err)
+	})
+
+	t.Run("returns injected error", func(t *testing.T) {
+		fc := NewFakeClient()
+		fc.Errors["DeleteBranch"] = errors.New("api down")
+		err := fc.DeleteBranch(ctx, "owner", "repo", "feature-branch")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "api down")
+		assert.Empty(t, fc.DeletedBranches)
+	})
+}
+
+func TestFakeClient_CreateBranch_ExistingBranches(t *testing.T) {
+	ctx := context.Background()
+	fc := NewFakeClient()
+	fc.ExistingBranches["owner/repo/feature-branch"] = true
+
+	err := fc.CreateBranch(ctx, "owner", "repo", "feature-branch")
+	require.Error(t, err)
+	assert.True(t, IsAlreadyExists(err))
+	assert.Empty(t, fc.CreatedBranches)
+}
+
+func TestFakeClient_CreateBranchFromSHA_ExistingBranches(t *testing.T) {
+	ctx := context.Background()
+	fc := NewFakeClient()
+	fc.ExistingBranches["owner/repo/feature"] = true
+
+	err := fc.CreateBranchFromSHA(ctx, "owner", "repo", "feature", "abc123")
+	require.Error(t, err)
+	assert.True(t, IsAlreadyExists(err))
+	assert.Empty(t, fc.CreatedBranchSHAs)
+}
+
 func TestFakeClient_DeleteRef(t *testing.T) {
 	ctx := context.Background()
 	fc := &FakeClient{}
@@ -742,6 +791,7 @@ func TestFakeClient_ErrorInjection(t *testing.T) {
 		{"GetFileContent", func(fc *FakeClient) error { _, err := fc.GetFileContent(ctx, "o", "r", "p"); return err }},
 		{"CreateBranch", func(fc *FakeClient) error { return fc.CreateBranch(ctx, "o", "r", "b") }},
 		{"CreateBranchFromSHA", func(fc *FakeClient) error { return fc.CreateBranchFromSHA(ctx, "o", "r", "b", "sha") }},
+		{"DeleteBranch", func(fc *FakeClient) error { return fc.DeleteBranch(ctx, "o", "r", "b") }},
 		{"DeleteRef", func(fc *FakeClient) error { return fc.DeleteRef(ctx, "o", "r", "heads/b") }},
 		{"CreateFileOnBranch", func(fc *FakeClient) error { return fc.CreateFileOnBranch(ctx, "o", "r", "b", "p", "m", nil) }},
 		{"CreateChangeProposal", func(fc *FakeClient) error {
@@ -889,6 +939,7 @@ func TestFakeClient_ThreadSafety(t *testing.T) {
 			_, _ = fc.GetFileContent(ctx, "o", "r", "file.txt")
 			_ = fc.CreateBranch(ctx, "o", "r", "b")
 			_ = fc.CreateBranchFromSHA(ctx, "o", "r", "sha-branch", "abc123")
+			_ = fc.DeleteBranch(ctx, "o", "r", "b")
 			_ = fc.DeleteRef(ctx, "o", "r", "heads/b")
 			_ = fc.CreateFileOnBranch(ctx, "o", "r", "b", "p", "m", []byte("data"))
 			_, _ = fc.CreateChangeProposal(ctx, "o", "r", "t", "b", "h", "base")
