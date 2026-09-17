@@ -1,12 +1,15 @@
 package gitlab
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -893,6 +896,44 @@ func TestCreatePullRequestReview_Comment_DiscussionErrorFallsBackToNote(t *testi
 	require.Len(t, notes, 1)
 	assert.Contains(t, notes[0], "`main.go:10`")
 	assert.Contains(t, notes[0], "Fix this")
+}
+
+// TestCreatePullRequestReview_Comment_ServerErrorFallsBackToNoteAndLogs
+// verifies that a 5xx from the Discussions API still falls back to the
+// note path (same as a 4xx rejection), but — unlike a 4xx — is logged,
+// since it may indicate a systemic Discussions API outage rather than
+// an expected diff-position rejection.
+func TestCreatePullRequestReview_Comment_ServerErrorFallsBackToNoteAndLogs(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mockMRDiffRefs(t, mux, "sha123")
+
+	var notes []string
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/notes", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		readJSONBody(t, r, &body)
+		notes = append(notes, body["body"])
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": len(notes)})
+	})
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests/30/discussions", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusInternalServerError, map[string]string{
+			"message": "internal error",
+		})
+	})
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	err := client.CreatePullRequestReview(ctx, "myorg", "myrepo", 30, "COMMENT", "", "sha123", []forge.ReviewComment{
+		{Path: "main.go", Line: 10, Body: "Fix this"},
+	})
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Contains(t, notes[0], "`main.go:10`")
+	assert.Contains(t, logBuf.String(), "falling back to note")
+	assert.Contains(t, logBuf.String(), "main.go:10")
 }
 
 func TestCreatePullRequestReview_Comment_MixedPositionedAndFileLevel(t *testing.T) {

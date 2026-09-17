@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -505,6 +506,14 @@ func (c *LiveClient) postInlineComments(ctx context.Context, proj string, number
 		if rc.Line > 0 && refs.usable(commitSHA) {
 			if err := c.postDiffDiscussion(ctx, proj, number, refs, rc); err == nil {
 				continue
+			} else if forge.IsTransient(err) {
+				// A 4xx here means GitLab rejected the diff position,
+				// which is an expected, silent fallback case handled by
+				// the note path below. forge.IsTransient(err) instead
+				// means a 5xx, rate limit, or network failure — that may
+				// indicate a systemic Discussions API problem, so log it
+				// rather than letting it degrade unnoticed to a note.
+				log.Printf("post diff discussion on !%d (%s:%d) failed, falling back to note: %v", number, rc.Path, rc.Line, err)
 			}
 		}
 		if err := c.postInlineNote(ctx, proj, number, rc); err != nil {
@@ -531,6 +540,16 @@ type discussionRequest struct {
 	Position discussionPosition `json:"position"`
 }
 
+// postDiffDiscussion posts rc as a positioned Discussions API comment.
+//
+// forge.ReviewComment carries a single Path, so NewPath and OldPath are
+// both set to rc.Path below. For a renamed file this sends
+// old_path == new_path (the destination name), which GitLab's
+// diff-position matching may reject; the caller falls back to a plain
+// note in that case. This is a pre-existing ReviewComment limitation,
+// not specific to positioned discussions — extend ReviewComment with
+// separate old/new path fields if positioning comments on renamed
+// files is needed.
 func (c *LiveClient) postDiffDiscussion(ctx context.Context, proj string, number int, refs *mrDiffRefs, rc forge.ReviewComment) error {
 	path := fmt.Sprintf("/projects/%s/merge_requests/%d/discussions", proj, number)
 	payload := discussionRequest{
