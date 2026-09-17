@@ -1832,6 +1832,12 @@ func (c *LiveClient) CreateBranchFromSHA(ctx context.Context, owner, repo, branc
 	return nil
 }
 
+// DeleteBranch deletes a git branch. Returns forge.ErrNotFound (wrapped)
+// if the branch does not exist.
+func (c *LiveClient) DeleteBranch(ctx context.Context, owner, repo, branchName string) error {
+	return c.DeleteRef(ctx, owner, repo, "heads/"+branchName)
+}
+
 // DeleteRef deletes a git ref (e.g., "heads/my-branch", "tags/v1.0").
 // Returns forge.ErrNotFound (wrapped) if the ref does not exist.
 func (c *LiveClient) DeleteRef(ctx context.Context, owner, repo, refPath string) error {

@@ -3555,6 +3555,35 @@ func TestDeleteRef_UnsupportedPrefix(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported ref path format")
 }
 
+func TestDeleteBranch(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	called := false
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/repository/branches/fullsend%2Fscaffold-install", func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		assert.Equal(t, http.MethodDelete, r.Method)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	err := client.DeleteBranch(ctx, "myorg", "myrepo", "fullsend/scaffold-install")
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+func TestDeleteBranch_NotFound(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/repository/branches/gone", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	err := client.DeleteBranch(ctx, "myorg", "myrepo", "gone")
+	require.Error(t, err)
+	assert.True(t, forge.IsNotFound(err))
+}
+
 // ---------------------------------------------------------------------------
 // CreateCrossRepoChangeProposal tests
 // ---------------------------------------------------------------------------

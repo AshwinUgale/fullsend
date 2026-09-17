@@ -602,6 +602,15 @@ type Client interface {
 	// and forge.ErrForbidden on insufficient permissions.
 	CreateBranchFromSHA(ctx context.Context, owner, repo, branchName, sha string) error
 
+	// DeleteBranch deletes the named git branch.
+	// Returns forge.ErrNotFound if the branch does not exist.
+	//
+	// This is a destructive operation. Callers must verify ownership
+	// or authorization at the call site before invoking it, especially
+	// when the branch name is predictable (for example
+	// fullsend/scaffold-install).
+	DeleteBranch(ctx context.Context, owner, repo, branchName string) error
+
 	// DeleteRef deletes a git ref (e.g., "heads/my-branch", "tags/v1.0").
 	// Returns forge.ErrNotFound if the ref does not exist.
 	DeleteRef(ctx context.Context, owner, repo, refPath string) error
