@@ -618,7 +618,12 @@ func convergeRepo(ctx context.Context,
 	// because the other is still missing.
 	needsBotToken := !gitlabBotTokenPresent(d.components)
 	needsSchedules := !gitlabSchedulesPresent(d.components)
-	needsPostInstall := needsBotToken || needsSchedules
+	// Computed via gitlabPostInstallDone (rather than needsBotToken ||
+	// needsSchedules, though the two are equivalent by De Morgan's law)
+	// so the existing gitlabPostInstallDone test coverage actually
+	// constrains this production value instead of only testing an
+	// otherwise-unused helper.
+	needsPostInstall := !gitlabPostInstallDone(d.components)
 
 	// Case 1: Workflow not on the default branch — full install via
 	// Install(), which always uses fresh-install PR metadata.

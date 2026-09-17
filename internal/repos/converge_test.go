@@ -3916,6 +3916,92 @@ func TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets(t *testing.T) 
 	}
 }
 
+// TestConverge_GitLab_NeedsPostInstallFlagsForPartialArtifacts covers a
+// review finding on #7418: gitlabPostInstallDone (and the needsBotToken /
+// needsSchedules present-checks it wraps) were only exercised directly by
+// TestGitlabPostInstallDone, never through Converge itself. A regression
+// that set NeedsGitLabBotToken / NeedsGitLabPipelineSchedules from the
+// combined needsPostInstall flag instead of their own present-checks would
+// still pass every other integration test, since those only cover the two
+// poles (nothing present, everything present). This exercises the partial
+// states in between: bot token present but schedules missing, schedules
+// present but the bot token missing, and the bot token plus only one of
+// the two schedules present.
+func TestConverge_GitLab_NeedsPostInstallFlagsForPartialArtifacts(t *testing.T) {
+	tests := []struct {
+		name            string
+		seed            func(fc *forge.FakeClient, full string)
+		wantBotToken    bool
+		wantSchedules   bool
+		wantPostInstall bool
+	}{
+		{
+			name: "bot token present, schedules missing",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.Secrets[full+"/"+forge.SecretForgeToken] = true
+			},
+			wantBotToken:    false,
+			wantSchedules:   true,
+			wantPostInstall: true,
+		},
+		{
+			name: "schedules present, bot token missing",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.PipelineSchedules[full] = []forge.PipelineSchedule{
+					{Description: "fullsend slash poll"},
+					{Description: "fullsend event poll"},
+				}
+			},
+			wantBotToken:    true,
+			wantSchedules:   false,
+			wantPostInstall: true,
+		},
+		{
+			name: "bot token plus only one schedule present",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.Secrets[full+"/"+forge.SecretForgeToken] = true
+				fc.PipelineSchedules[full] = []forge.PipelineSchedule{
+					{Description: "fullsend slash poll"},
+				}
+			},
+			wantBotToken:    false,
+			wantSchedules:   true,
+			wantPostInstall: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClientForBatch("acme/api")
+			tt.seed(fc, "acme/api")
+
+			cfg := gitlabConvergeCfg("acme/api")
+			cfg.Direct = false
+			sc := &spyScaffoldCommit{}
+			result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+			if err != nil {
+				t.Fatalf("Converge() error: %v", err)
+			}
+			if len(result.Failed()) != 0 {
+				t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+			}
+			if len(result.Installed()) != 1 {
+				t.Fatalf("expected 1 installed, got %d", len(result.Installed()))
+			}
+			got := result.Installed()[0]
+			if got.NeedsGitLabBotToken != tt.wantBotToken {
+				t.Errorf("NeedsGitLabBotToken = %v, want %v", got.NeedsGitLabBotToken, tt.wantBotToken)
+			}
+			if got.NeedsGitLabPipelineSchedules != tt.wantSchedules {
+				t.Errorf("NeedsGitLabPipelineSchedules = %v, want %v", got.NeedsGitLabPipelineSchedules, tt.wantSchedules)
+			}
+			if got.NeedsGitLabPostInstall != tt.wantPostInstall {
+				t.Errorf("NeedsGitLabPostInstall = %v, want %v", got.NeedsGitLabPostInstall, tt.wantPostInstall)
+			}
+		})
+	}
+}
+
 // TestGitlabPostInstallDone is a table test for gitlabPostInstallDone
 // covering partial GitLab post-install states. gitlabPostInstallDone is
 // a strict AND of the bot-token secret and every pipeline-schedule
