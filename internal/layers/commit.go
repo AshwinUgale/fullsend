@@ -265,7 +265,7 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 	// scaffold branch.
 	authenticatedUser, userErr := client.GetAuthenticatedUser(ctx)
 	if userErr != nil {
-		printer.StepWarn(fmt.Sprintf("Could not identify user for stale PR cleanup: %v", userErr))
+		printer.StepWarn(fmt.Sprintf("Could not identify authenticated user: %v", userErr))
 	} else if !isCrossRepo {
 		// Close stale scaffold PRs from a different install mode before
 		// creating or updating our own. This prevents merging a PR that
@@ -307,10 +307,18 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 			printer.StepFail("Failed to create scaffold branch")
 			return false, fmt.Errorf("creating scaffold branch: %w", branchErr)
 		}
-		if recErr := recreateStaleScaffoldBranch(ctx, client, printer,
+		proceed, recErr := recreateStaleScaffoldBranch(ctx, client, printer,
 			upstreamOwner, upstreamRepo, targetOwner, targetRepo,
-			scaffoldBranch, authenticatedUser, createBranch); recErr != nil {
+			scaffoldBranch, authenticatedUser, createBranch)
+		if recErr != nil {
 			return false, recErr
+		}
+		if !proceed {
+			// A foreign or empty-author open PR already uses this
+			// predictable branch. The fail-closed ownership check left
+			// the branch in place — do not commit onto infrastructure we
+			// don't own.
+			return false, nil
 		}
 	}
 
@@ -361,22 +369,29 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 //
 // Fail-closed ownership check: if an open PR on this (predictable) branch
 // has an empty author or an author other than authenticatedUser, the
-// branch is left in place. Our own open PR is also left in place so a
-// re-run updates that PR instead of replacing it. The branch is only
-// deleted when no open PR uses it.
+// branch is left in place and proceedToCommit is false — the caller must
+// not commit onto a branch it doesn't own. Our own open PR is also left
+// in place (proceedToCommit true) so a re-run updates that PR instead of
+// replacing it. The branch is only deleted when no open PR uses it.
+//
+// When ownership cannot be determined at all (authenticatedUser is empty,
+// or listing PRs fails), this falls back to the pre-existing behavior of
+// leaving the branch in place and letting the caller commit onto it —
+// the same as before this function existed — since there is no signal of
+// a competing PR to fail closed against.
 func recreateStaleScaffoldBranch(ctx context.Context, client forge.Client, printer *ui.Printer,
 	upstreamOwner, upstreamRepo, targetOwner, targetRepo, scaffoldBranch, authenticatedUser string,
-	createBranch func() error) error {
+	createBranch func() error) (proceedToCommit bool, err error) {
 
 	if authenticatedUser == "" {
 		printer.StepWarn("Could not verify scaffold branch ownership; leaving existing branch in place")
-		return nil
+		return true, nil
 	}
 
 	prs, err := client.ListRepoPullRequests(ctx, upstreamOwner, upstreamRepo)
 	if err != nil {
 		printer.StepWarn(fmt.Sprintf("Could not check open PRs before replacing scaffold branch: %v", err))
-		return nil
+		return true, nil
 	}
 
 	for _, pr := range prs {
@@ -387,24 +402,24 @@ func recreateStaleScaffoldBranch(ctx context.Context, client forge.Client, print
 			printer.StepWarn(fmt.Sprintf(
 				"Scaffold branch %q already exists with open PR #%d not authored by %s; leaving it in place",
 				scaffoldBranch, pr.Number, authenticatedUser))
-			return nil
+			return false, nil
 		}
 		// Our own open PR: update in place rather than replacing the branch.
-		return nil
+		return true, nil
 	}
 
 	printer.StepStart(fmt.Sprintf("Deleting stale scaffold branch %s", scaffoldBranch))
 	if delErr := client.DeleteBranch(ctx, targetOwner, targetRepo, scaffoldBranch); delErr != nil && !forge.IsNotFound(delErr) {
 		printer.StepWarn(fmt.Sprintf("Could not delete stale scaffold branch %s: %v", scaffoldBranch, delErr))
-		return nil
+		return true, nil
 	}
 
 	if createErr := createBranch(); createErr != nil {
 		printer.StepFail("Failed to recreate scaffold branch")
-		return fmt.Errorf("recreating scaffold branch: %w", createErr)
+		return false, fmt.Errorf("recreating scaffold branch: %w", createErr)
 	}
 	printer.StepDone(fmt.Sprintf("Recreated scaffold branch %s from current default branch", scaffoldBranch))
-	return nil
+	return true, nil
 }
 
 // commitViaPR creates a feature branch, commits files, and opens a PR.

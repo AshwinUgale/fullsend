@@ -1392,6 +1392,7 @@ func TestCommitScaffoldViaPR_ForeignOpenPRLeavesBranch(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, client.DeletedBranches, "must not delete a branch with someone else's open PR")
+	assert.Empty(t, client.CommittedFilesToBranch, "must not commit onto a branch owned by another PR")
 	assert.Contains(t, buf.String(), "not authored by acme")
 }
 
@@ -1411,6 +1412,7 @@ func TestCommitScaffoldViaPR_EmptyAuthorOpenPRLeavesBranch(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, client.DeletedBranches, "empty author must fail closed")
+	assert.Empty(t, client.CommittedFilesToBranch, "empty author must fail closed against commit too")
 	assert.Contains(t, buf.String(), "not authored by acme")
 }
 
@@ -1420,10 +1422,11 @@ func TestRecreateStaleScaffoldBranch_ListErrorLeavesBranch(t *testing.T) {
 	printer, buf := newTestPrinter()
 
 	created := 0
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
 		func() error { created++; return nil })
 	require.NoError(t, err)
+	assert.True(t, proceed, "cannot verify ownership from a list error, so fall back to committing as before")
 	assert.Equal(t, 0, created)
 	assert.Empty(t, client.DeletedBranches)
 	assert.Contains(t, buf.String(), "Could not check open PRs")
@@ -1434,10 +1437,11 @@ func TestRecreateStaleScaffoldBranch_EmptyUserLeavesBranch(t *testing.T) {
 	printer, buf := newTestPrinter()
 
 	created := 0
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "",
 		func() error { created++; return nil })
 	require.NoError(t, err)
+	assert.True(t, proceed, "cannot verify ownership without an authenticated user, so fall back to committing as before")
 	assert.Equal(t, 0, created)
 	assert.Empty(t, client.DeletedBranches)
 	assert.Contains(t, buf.String(), "ownership")
@@ -1449,10 +1453,11 @@ func TestRecreateStaleScaffoldBranch_DeleteErrorLeavesBranch(t *testing.T) {
 	printer, buf := newTestPrinter()
 
 	created := 0
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
 		func() error { created++; return nil })
 	require.NoError(t, err)
+	assert.True(t, proceed, "ownership was already verified before the delete attempt, so fall back to committing")
 	assert.Equal(t, 0, created)
 	assert.Contains(t, buf.String(), "Could not delete stale scaffold branch")
 }
@@ -1463,10 +1468,11 @@ func TestRecreateStaleScaffoldBranch_DeleteNotFoundStillRecreates(t *testing.T) 
 	printer, buf := newTestPrinter()
 
 	created := 0
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
 		func() error { created++; return nil })
 	require.NoError(t, err)
+	assert.True(t, proceed)
 	assert.Equal(t, 1, created)
 	assert.Contains(t, buf.String(), "Recreated scaffold branch")
 }
@@ -1475,10 +1481,11 @@ func TestRecreateStaleScaffoldBranch_RecreateError(t *testing.T) {
 	client := forge.NewFakeClient()
 	printer, buf := newTestPrinter()
 
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
 		func() error { return fmt.Errorf("create failed") })
 	require.Error(t, err)
+	assert.False(t, proceed)
 	assert.Contains(t, err.Error(), "recreating scaffold branch")
 	assert.Contains(t, buf.String(), "Failed to recreate scaffold branch")
 }
@@ -1493,10 +1500,11 @@ func TestRecreateStaleScaffoldBranch_CrossForkHeadFormat(t *testing.T) {
 	printer, _ := newTestPrinter()
 
 	created := 0
-	err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
 		"acme", "widget", "contributor", "widget", "fullsend/scaffold-install", "contributor",
 		func() error { created++; return nil })
 	require.NoError(t, err)
+	assert.True(t, proceed, "own open PR should update in place, not skip the commit")
 	assert.Equal(t, 0, created, "own open PR with owner:branch head should update in place")
 	assert.Empty(t, client.DeletedBranches)
 }
