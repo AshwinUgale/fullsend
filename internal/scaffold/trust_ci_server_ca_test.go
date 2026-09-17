@@ -108,6 +108,46 @@ func TestTrustCIServerCAScript_ValidCAExportsCombinedBundle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "-----BEGIN CERTIFICATE-----")
 	assert.Contains(t, string(data), string(caPEM))
+
+	// Lock the append semantics of the script itself, not just of the Go
+	// client: when the host has a discoverable system CA bundle (the same
+	// candidate list the script checks), the combined bundle must still
+	// contain that system bundle's bytes alongside the extra PEM, and must
+	// be strictly larger than the extra-CA file alone. A future regression
+	// that replaced the system bundle instead of prepending it would pass
+	// every other assertion above but fail these.
+	if systemCA := firstReadableSystemCABundle(); systemCA != "" {
+		systemData, err := os.ReadFile(systemCA)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), string(systemData), "combined bundle must retain the discovered system CA bundle (%s) in addition to the extra CA", systemCA)
+		assert.Greater(t, len(data), len(caPEM), "combined bundle must be larger than the extra-CA file alone when a system bundle was found")
+	} else {
+		t.Log("no system CA bundle candidate found on this host; skipping system-bundle-retained assertion")
+	}
+}
+
+// firstReadableSystemCABundle mirrors the candidate list in
+// trust-ci-server-ca.sh so the test can assert against whichever bundle the
+// script actually discovers on this host.
+func firstReadableSystemCABundle() string {
+	for _, candidate := range []string{
+		"/etc/pki/tls/certs/ca-bundle.crt",
+		"/etc/ssl/certs/ca-certificates.crt",
+		"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+		"/etc/ssl/ca-bundle.pem",
+		"/etc/ssl/cert.pem",
+	} {
+		f, err := os.Open(candidate)
+		if err != nil {
+			continue
+		}
+		info, statErr := f.Stat()
+		_ = f.Close()
+		if statErr == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func TestTrustCIServerCAScript_Idempotent(t *testing.T) {

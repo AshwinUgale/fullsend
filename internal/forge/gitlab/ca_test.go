@@ -22,6 +22,68 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// systemPoolCACert and systemPoolCAKey are a synthetic CA primed into the
+// process-wide x509.SystemCertPool() cache by TestMain before any test runs
+// (see TestMain). crypto/x509 caches the system pool behind a sync.Once for
+// the lifetime of the process, so priming it here — rather than trying to
+// set SSL_CERT_FILE from within an individual test — is what makes
+// TestApplyCIServerTLSCA_TrustsPrivateCAAndRejectsUntrusted's "system pool
+// CA survives the private-CA append" assertion deterministic regardless of
+// test execution order.
+var (
+	systemPoolCACert *x509.Certificate
+	systemPoolCAKey  *ecdsa.PrivateKey
+)
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "fullsend-gitlab-systemca")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "fullsend-test-system-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		panic(err)
+	}
+	systemPoolCACert = cert
+	systemPoolCAKey = key
+
+	path := filepath.Join(dir, "system-ca.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("SSL_CERT_FILE", path); err != nil {
+		panic(err)
+	}
+	// Force crypto/x509's system-pool sync.Once to fire now, while
+	// SSL_CERT_FILE points at our synthetic CA, so applyCIServerTLSCA's
+	// later calls to x509.SystemCertPool() (from any test) observe it as
+	// already part of the "system" pool.
+	if _, err := x509.SystemCertPool(); err != nil {
+		panic(err)
+	}
+
+	os.Exit(m.Run())
+}
+
 func writePEMCert(t *testing.T, dir, name string, cert *x509.Certificate) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -118,6 +180,41 @@ func startUniqueTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
+// startCASignedTLSServer starts an httptest TLS server presenting a leaf
+// certificate signed by the given CA, rather than a self-signed cert. Used
+// to prove that a CA already present in the system pool (see
+// systemPoolCACert / TestMain) is still honored after applyCIServerTLSCA
+// appends a private CA — a self-signed cert can't distinguish "the pool has
+// this exact cert" from "the pool has the CA that issued this cert".
+func startCASignedTLSServer(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, handler http.Handler) *httptest.Server {
+	t.Helper()
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &leafKey.PublicKey, caKey)
+	require.NoError(t, err)
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{der},
+			PrivateKey:  leafKey,
+		}},
+		MinVersion: tls.VersionTLS12,
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestApplyCIServerTLSCA_TrustsPrivateCAAndRejectsUntrusted(t *testing.T) {
 	trusted := startUniqueTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id": 1}`)
@@ -125,6 +222,15 @@ func TestApplyCIServerTLSCA_TrustsPrivateCAAndRejectsUntrusted(t *testing.T) {
 
 	untrusted := startUniqueTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id": 2}`)
+	}))
+
+	// Chains to systemPoolCACert, which TestMain primed into the system
+	// pool before applyCIServerTLSCA ever ran. If a future regression
+	// turned the private-CA append into a replace, this handshake — unlike
+	// the two above, which only exercise the newly-appended private CA —
+	// would start failing.
+	viaSystemPool := startCASignedTLSServer(t, systemPoolCACert, systemPoolCAKey, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id": 3}`)
 	}))
 
 	caPath := writePEMCert(t, t.TempDir(), "ci-server-ca.pem", trusted.Certificate())
@@ -148,6 +254,13 @@ func TestApplyCIServerTLSCA_TrustsPrivateCAAndRejectsUntrusted(t *testing.T) {
 	_, err = client.http.Get(untrusted.URL + "/user")
 	require.Error(t, err, "certificate not signed by the supplied CA must be rejected")
 	assert.Contains(t, err.Error(), "certificate")
+
+	resp3, err := client.http.Get(viaSystemPool.URL + "/user")
+	require.NoError(t, err, "a cert chaining to a pre-existing system-pool CA must remain trusted after the private CA append")
+	defer resp3.Body.Close()
+	body3, err := io.ReadAll(resp3.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body3), `"id": 3`)
 }
 
 func TestApplyCIServerTLSCA_UnsetRejectsUnknownAuthority(t *testing.T) {
