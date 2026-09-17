@@ -497,6 +497,14 @@ func (c *LiveClient) postInlineComments(ctx context.Context, proj string, number
 			fetched, err := c.getMergeRequestDiffRefs(ctx, proj, number)
 			if err == nil {
 				refs = fetched
+			} else if forge.IsTransient(err) {
+				// A transient failure here (5xx, rate limit, network) would
+				// otherwise silently downgrade every inline discussion in
+				// this batch to a note with no diagnostic trail. Non-transient
+				// errors (e.g. 404 in test stubs) continue to fall back
+				// silently, matching postDiffDiscussion's own error handling
+				// below.
+				log.Printf("get merge request !%d diff refs failed, falling back to notes: %v", number, err)
 			}
 			break
 		}
