@@ -469,6 +469,36 @@ func TestListRepoPullRequests(t *testing.T) {
 	assert.Equal(t, "contributor/myrepo", mrs[1].HeadRepo, "differing source project id means the head lives in a fork, resolved to its owner/repo path")
 }
 
+func TestListRepoPullRequests_ForkProjectLookupEmptyPath(t *testing.T) {
+	client, mux := setupTest(t)
+	ctx := context.Background()
+
+	mux.HandleFunc("/api/v4/projects/myorg%2Fmyrepo/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{
+				"iid":               2,
+				"title":             "MR Two",
+				"web_url":           "https://gitlab.com/myorg/myrepo/-/merge_requests/2",
+				"source_branch":     "branch-2",
+				"target_branch":     "main",
+				"source_project_id": 9,
+				"target_project_id": 5,
+			},
+		})
+	})
+
+	mux.HandleFunc("/api/v4/projects/9", func(w http.ResponseWriter, r *http.Request) {
+		// A 200 response that decodes successfully but omits
+		// path_with_namespace must not be treated as a resolved (empty)
+		// HeadRepo — it must fail closed like a decode/get error would.
+		writeJSON(t, w, http.StatusOK, map[string]any{})
+	})
+
+	mrs, err := client.ListRepoPullRequests(ctx, "myorg", "myrepo")
+	require.Error(t, err)
+	assert.Nil(t, mrs)
+}
+
 func TestListRepoPullRequests_Author(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()

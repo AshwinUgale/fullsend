@@ -150,6 +150,9 @@ func (c *LiveClient) resolveProjectPath(ctx context.Context, projectID int) (str
 	if err := decodeJSON(resp, &proj); err != nil {
 		return "", fmt.Errorf("decode project %d: %w", projectID, err)
 	}
+	if proj.PathWithNamespace == "" {
+		return "", fmt.Errorf("get project %d: response missing path_with_namespace", projectID)
+	}
 	return proj.PathWithNamespace, nil
 }
 
