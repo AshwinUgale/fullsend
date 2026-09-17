@@ -531,8 +531,8 @@ func formatFindingComment(f ReviewFinding) string {
 // is422Error reports whether err wraps a GitHub 422 Unprocessable Entity
 // API error. Used to detect inline comment validation failures.
 // NOTE: only matches *gh.APIError — GitLab errors won't trigger the
-// 422 fallback. This is acceptable because GitLab posts inline findings
-// as plain note text, not positioned diff comments.
+// 422 fallback. The GitLab client handles unpositionable findings
+// internally (positioned discussion, then note fallback).
 func is422Error(err error) bool {
 	var apiErr *gh.APIError
 	if errors.As(err, &apiErr) {
@@ -770,9 +770,11 @@ func sanitizeReviewResult(r ReviewResult, printer *ui.Printer) ReviewResult {
 		}
 	}
 
-	// Sanitize finding fields — severity, category, description, and
+	// Sanitize finding fields — severity, category, file, description, and
 	// remediation are all interpolated into Markdown posted to the
-	// forge and could carry secrets from agent output.
+	// forge (and, for File, into a structured GitLab Discussions API
+	// position field via forge.ReviewComment.Path) and could carry
+	// secrets from agent output.
 	for i := range r.Findings {
 		if r.Findings[i].Severity != "" {
 			result := pipeline.Scan(r.Findings[i].Severity)
@@ -784,6 +786,12 @@ func sanitizeReviewResult(r ReviewResult, printer *ui.Printer) ReviewResult {
 			result := pipeline.Scan(r.Findings[i].Category)
 			if result.Sanitized != "" {
 				r.Findings[i].Category = result.Sanitized
+			}
+		}
+		if r.Findings[i].File != "" {
+			result := pipeline.Scan(r.Findings[i].File)
+			if result.Sanitized != "" {
+				r.Findings[i].File = result.Sanitized
 			}
 		}
 		if r.Findings[i].Description != "" {
