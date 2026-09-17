@@ -1389,7 +1389,7 @@ func TestCommitScaffoldViaPR_ForeignOpenPRLeavesBranch(t *testing.T) {
 
 	_, err := CommitScaffoldFiles(context.Background(), client, printer,
 		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
-	require.NoError(t, err)
+	require.Error(t, err, "unverifiable ownership must abort delivery, not silently succeed")
 
 	assert.Empty(t, client.DeletedBranches, "must not delete a branch with someone else's open PR")
 	assert.Empty(t, client.CommittedFilesToBranch, "must not commit onto a branch owned by another PR")
@@ -1409,7 +1409,7 @@ func TestCommitScaffoldViaPR_EmptyAuthorOpenPRLeavesBranch(t *testing.T) {
 
 	_, err := CommitScaffoldFiles(context.Background(), client, printer,
 		"acme", "widget", "main", testMeta("msg", "title", "body"), testFiles, false, nil)
-	require.NoError(t, err)
+	require.Error(t, err, "unverifiable ownership must abort delivery, not silently succeed")
 
 	assert.Empty(t, client.DeletedBranches, "empty author must fail closed")
 	assert.Empty(t, client.CommittedFilesToBranch, "empty author must fail closed against commit too")
@@ -1434,11 +1434,14 @@ func TestRecreateStaleScaffoldBranch_ListErrorLeavesBranch(t *testing.T) {
 	assert.Contains(t, buf.String(), "Could not check open PRs")
 
 	// The caller (commitBranchAndPR) must also treat proceed=false as a
-	// hard stop and never commit onto the branch it couldn't verify.
+	// hard stop and never commit onto the branch it couldn't verify — and
+	// must report the abort as an error rather than a silent success, so
+	// callers up the chain (which treat a nil error as delivered) don't
+	// exit 0 with nothing delivered.
 	_, err = commitBranchAndPR(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "main",
 		"msg", "title", "body", testFiles)
-	require.NoError(t, err)
+	require.Error(t, err, "unverifiable ownership must abort delivery, not silently succeed")
 	assert.Empty(t, client.CommittedFilesToBranch, "cannot verify ownership from a list error, so must not commit either")
 }
 
@@ -1458,11 +1461,14 @@ func TestRecreateStaleScaffoldBranch_EmptyUserLeavesBranch(t *testing.T) {
 	assert.Contains(t, buf.String(), "ownership")
 
 	// The caller (commitBranchAndPR) must also treat proceed=false as a
-	// hard stop and never commit onto the branch it couldn't verify.
+	// hard stop and never commit onto the branch it couldn't verify — and
+	// must report the abort as an error rather than a silent success, so
+	// callers up the chain (which treat a nil error as delivered) don't
+	// exit 0 with nothing delivered.
 	_, err = commitBranchAndPR(context.Background(), client, printer,
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "main",
 		"msg", "title", "body", testFiles)
-	require.NoError(t, err)
+	require.Error(t, err, "unverifiable ownership must abort delivery, not silently succeed")
 	assert.Empty(t, client.CommittedFilesToBranch, "cannot verify ownership without an authenticated user, so must not commit either")
 }
 

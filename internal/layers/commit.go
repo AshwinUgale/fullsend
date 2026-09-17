@@ -319,7 +319,14 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 			// all (no authenticated user, or listing PRs failed). Either
 			// way the fail-closed ownership check left the branch in
 			// place — do not commit onto infrastructure we don't own.
-			return false, nil
+			//
+			// Report this to the caller as a failure rather than a silent
+			// no-op: every caller of the CommitScaffoldFiles chain treats a
+			// nil error as successful delivery, so returning nil here would
+			// let install/upgrade exit 0 while the scaffold files were
+			// never actually delivered.
+			printer.StepFail("Scaffold branch ownership could not be verified; scaffold delivery aborted")
+			return false, fmt.Errorf("scaffold branch %q already exists and its ownership could not be verified; leaving it in place instead of committing", scaffoldBranch)
 		}
 	}
 
