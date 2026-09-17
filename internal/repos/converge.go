@@ -96,7 +96,32 @@ type ConvergeResult struct {
 	// exists" — the GCP inference secrets every Install() writes are
 	// unrelated to GitLab post-install and must not mask it having
 	// failed or never run.
+	//
+	// This is an OR of NeedsGitLabBotToken and NeedsGitLabPipelineSchedules
+	// below, kept for callers that only need to know whether GitLab
+	// post-install requires any action at all (e.g. whether to fetch a
+	// GitLab client for the repo). Callers that actually perform
+	// post-install setup must gate each action on its own specific flag
+	// instead — gating both the bot-token and schedule setup on this
+	// combined flag re-revokes an already-valid bot PAT whenever only
+	// the schedules are missing (or vice versa).
 	NeedsGitLabPostInstall bool
+
+	// NeedsGitLabBotToken is true when the fullsend-bot PAT secret
+	// (secret:FULLSEND_FORGE_TOKEN) was not already present before this
+	// run. Callers must gate bot-token setup on this field specifically,
+	// not on NeedsGitLabPostInstall, so a retry where the token already
+	// exists does not revoke and recreate the live PAT merely because a
+	// pipeline schedule is still missing.
+	NeedsGitLabBotToken bool
+
+	// NeedsGitLabPipelineSchedules is true when at least one pipeline
+	// schedule component (see PipelineScheduleSpecs) was not already
+	// present before this run. Callers must gate pipeline-schedule setup
+	// on this field specifically, not on NeedsGitLabPostInstall, so a
+	// retry where the schedules already exist does not delete and
+	// recreate them merely because the bot token is still missing.
+	NeedsGitLabPipelineSchedules bool
 
 	// Converged is true when the repo had drifted components that were
 	// repaired (variables, refs, or missing scaffold files).
@@ -222,6 +247,23 @@ func anyComponentPresent(components []ComponentStatus) bool {
 	return false
 }
 
+// gitlabBotTokenPresent returns true when the fullsend-bot PAT secret
+// (secret:FULLSEND_FORGE_TOKEN) is already present.
+func gitlabBotTokenPresent(components []ComponentStatus) bool {
+	return hasComponent(components, "secret:"+forge.SecretForgeToken)
+}
+
+// gitlabSchedulesPresent returns true when every pipeline-schedule
+// component (see PipelineScheduleSpecs) is already present.
+func gitlabSchedulesPresent(components []ComponentStatus) bool {
+	for _, spec := range PipelineScheduleSpecs() {
+		if !hasComponent(components, spec.ComponentName) {
+			return false
+		}
+	}
+	return true
+}
+
 // gitlabPostInstallDone returns true when the GitLab-specific
 // post-install artifacts — the fullsend-bot PAT secret and every
 // pipeline schedule — are already present. Unlike anyComponentPresent,
@@ -230,16 +272,13 @@ func anyComponentPresent(components []ComponentStatus) bool {
 // Install() succeeded but whose GitLab post-install step failed or
 // never ran is not mistaken for one that already has a bot token and
 // schedules.
+//
+// This is an AND of the two artifacts, so it does not distinguish which
+// one is missing. Callers that need to act on only the missing piece
+// (see NeedsGitLabBotToken / NeedsGitLabPipelineSchedules) must call
+// gitlabBotTokenPresent / gitlabSchedulesPresent directly instead.
 func gitlabPostInstallDone(components []ComponentStatus) bool {
-	if !hasComponent(components, "secret:"+forge.SecretForgeToken) {
-		return false
-	}
-	for _, spec := range PipelineScheduleSpecs() {
-		if !hasComponent(components, spec.ComponentName) {
-			return false
-		}
-	}
-	return true
+	return gitlabBotTokenPresent(components) && gitlabSchedulesPresent(components)
 }
 
 // workflowPresent returns true when the forge-specific shim workflow file
@@ -571,7 +610,15 @@ func convergeRepo(ctx context.Context,
 	// present — the GCP inference secrets Install() always writes are
 	// unrelated to GitLab post-install, so their presence alone must not
 	// mask a post-install step that failed or never ran.
-	needsPostInstall := !gitlabPostInstallDone(d.components)
+	//
+	// needsBotToken and needsSchedules are tracked separately (rather
+	// than only the combined needsPostInstall) so callers can run
+	// bot-token setup and pipeline-schedule setup independently: a retry
+	// where one artifact already exists must not redo that one just
+	// because the other is still missing.
+	needsBotToken := !gitlabBotTokenPresent(d.components)
+	needsSchedules := !gitlabSchedulesPresent(d.components)
+	needsPostInstall := needsBotToken || needsSchedules
 
 	// Case 1: Workflow not on the default branch — full install via
 	// Install(), which always uses fresh-install PR metadata.
@@ -581,6 +628,8 @@ func convergeRepo(ctx context.Context,
 		if cfg.DryRun {
 			cr.Installed = true
 			cr.NeedsGitLabPostInstall = needsPostInstall
+			cr.NeedsGitLabBotToken = needsBotToken
+			cr.NeedsGitLabPipelineSchedules = needsSchedules
 			cr.Actions = append(cr.Actions, ComponentAction{
 				Component: "all",
 				Action:    "add",
@@ -650,6 +699,8 @@ func convergeRepo(ctx context.Context,
 
 		cr.Installed = true
 		cr.NeedsGitLabPostInstall = needsPostInstall
+		cr.NeedsGitLabBotToken = needsBotToken
+		cr.NeedsGitLabPipelineSchedules = needsSchedules
 		cr.WIFProvider = installResult.WIFProvider
 		cr.Actions = append(cr.Actions, ComponentAction{
 			Component: "all",

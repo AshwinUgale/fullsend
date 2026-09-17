@@ -3915,3 +3915,95 @@ func TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets(t *testing.T) 
 		t.Error("expected NeedsGitLabPostInstall=true: pre-existing GCP inference secrets must not mask a missing GitLab bot token/schedules")
 	}
 }
+
+// TestGitlabPostInstallDone is a table test for gitlabPostInstallDone
+// covering partial GitLab post-install states. gitlabPostInstallDone is
+// a strict AND of the bot-token secret and every pipeline-schedule
+// component; before this test, only the two poles (nothing present, and
+// token+both schedules present) were exercised, so a regression that
+// weakened the AND to check only the token (or only the schedules)
+// would still pass. This covers the partial states in between: token
+// only, schedules only (no token), and token plus just one of the two
+// schedules.
+func TestGitlabPostInstallDone(t *testing.T) {
+	specs := PipelineScheduleSpecs()
+	if len(specs) < 2 {
+		t.Fatalf("expected at least 2 pipeline schedule specs, got %d", len(specs))
+	}
+	tokenComponent := "secret:" + forge.SecretForgeToken
+	schedule0 := specs[0].ComponentName
+	schedule1 := specs[1].ComponentName
+
+	tests := []struct {
+		name       string
+		components []ComponentStatus
+		want       bool
+	}{
+		{
+			name:       "nil components",
+			components: nil,
+			want:       false,
+		},
+		{
+			name:       "empty components",
+			components: []ComponentStatus{},
+			want:       false,
+		},
+		{
+			name: "GCP secrets only (unrelated to GitLab post-install)",
+			components: []ComponentStatus{
+				{Name: "secret:" + forge.SecretGCPProjectID, Present: true},
+				{Name: "secret:" + forge.SecretGCPWIFProvider, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token only, no schedules",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "both schedules only, no bot token",
+			components: []ComponentStatus{
+				{Name: schedule0, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus only the first schedule",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule0, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus only the second schedule",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus both schedules",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule0, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := gitlabPostInstallDone(tt.components); got != tt.want {
+				t.Errorf("gitlabPostInstallDone(%+v) = %v, want %v", tt.components, got, tt.want)
+			}
+		})
+	}
+}
