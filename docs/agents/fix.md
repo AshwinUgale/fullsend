@@ -123,7 +123,9 @@ direct control over what to fix:
   ([details](#links-and-urls-in-instructions))
 
 The fix agent also triggers automatically when the [review agent](review.md) submits a
-"changes requested" review on a same-repo PR (fork PRs are blocked).
+"changes requested" review on a same-repo PR (fork PRs are blocked). On GitHub
+this is the native `pull_request_review` event; on GitLab it is a poller-routed
+MR note that contains `<!-- fullsend:changes-requested -->`.
 
 For **PRs authored by the fullsend code agent** (`fullsend-ai-coder[bot]`),
 automatic fixing happens with no extra setup — the fix agent responds to review

@@ -1,10 +1,15 @@
 package dispatch
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/fullsend-ai/fullsend/internal/forge"
+)
 
 // changesRequestedMarker is the HTML comment that the review bot
-// embeds in MR notes to signal the fix stage.
-const changesRequestedMarker = "<!-- fullsend:changes-requested -->"
+// embeds in MR notes to signal the fix stage. Aliased from forge so
+// GitLab note posting, poller retention, and routing stay in lockstep.
+const changesRequestedMarker = forge.ChangesRequestedMarker
 
 // HarnessRouter implements EventRouter by applying the default routing
 // rules from ADR 0067's event routing table. Slash commands (/fs-X)

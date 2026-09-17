@@ -5,6 +5,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/fullsend-ai/fullsend/internal/forge"
 )
 
 var routableLabels = map[string]bool{
@@ -326,7 +328,7 @@ func (p *Poller) filterBotEvents(events []RoutableEvent) []RoutableEvent {
 			continue
 		}
 		if event.Type == "mr_note" &&
-			strings.Contains(event.NoteBody, "<!-- fullsend:changes-requested -->") &&
+			strings.Contains(event.NoteBody, forge.ChangesRequestedMarker) &&
 			event.NoteAuthorID == p.botUserID {
 			filtered = append(filtered, event)
 			continue
