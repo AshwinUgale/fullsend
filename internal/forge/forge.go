@@ -218,7 +218,8 @@ type ChangeProposal struct {
 	Number int
 	Head   string
 	// HeadRepo identifies the repository the head branch lives in, as
-	// "owner/repo" (GitHub) or a project identifier (GitLab). Empty when
+	// "owner/repo" on both GitHub and GitLab (GitLab resolves a fork's
+	// numeric source project ID to its path_with_namespace). Empty when
 	// the forge doesn't report it (e.g. a deleted fork). Used to tell a
 	// same-named branch in an unrelated fork apart from one in the repo
 	// actually being checked, since Head alone is just a bare ref name.

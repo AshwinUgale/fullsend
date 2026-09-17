@@ -1531,6 +1531,31 @@ func TestRecreateStaleScaffoldBranch_CrossForkHeadFormat(t *testing.T) {
 	assert.Empty(t, client.DeletedBranches)
 }
 
+func TestRecreateStaleScaffoldBranch_ForeignForkHeadFormat(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.PullRequests = map[string][]forge.ChangeProposal{
+		"acme/widget": {
+			// Same "owner/repo"-shaped HeadRepo GitLab's live list API
+			// resolves a fork MR to (see ListRepoPullRequests), but authored
+			// by someone other than us — the fail-closed ownership check
+			// must still catch this once HeadRepo correctly identifies the
+			// fork as the one we're about to commit to.
+			{Number: 3, Title: "scaffold", Head: "fullsend/scaffold-install", HeadRepo: "contributor/widget", Base: "main", Author: "someone-else"},
+		},
+	}
+	printer, buf := newTestPrinter()
+
+	created := 0
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+		"acme", "widget", "contributor", "widget", "fullsend/scaffold-install", "contributor",
+		func() error { created++; return nil })
+	require.NoError(t, err)
+	assert.False(t, proceed, "a foreign-authored open PR on the correct fork must fail closed")
+	assert.Equal(t, 0, created)
+	assert.Empty(t, client.DeletedBranches, "must not delete a branch with someone else's open PR")
+	assert.Contains(t, buf.String(), "not authored by contributor")
+}
+
 func TestRecreateStaleScaffoldBranch_UnrelatedForkSameNameIgnored(t *testing.T) {
 	client := forge.NewFakeClient()
 	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true

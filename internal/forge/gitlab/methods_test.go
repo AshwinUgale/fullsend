@@ -453,6 +453,12 @@ func TestListRepoPullRequests(t *testing.T) {
 		})
 	})
 
+	mux.HandleFunc("/api/v4/projects/9", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"path_with_namespace": "contributor/myrepo",
+		})
+	})
+
 	mrs, err := client.ListRepoPullRequests(ctx, "myorg", "myrepo")
 	require.NoError(t, err)
 	require.Len(t, mrs, 2)
@@ -460,7 +466,7 @@ func TestListRepoPullRequests(t *testing.T) {
 	assert.Equal(t, "branch-1", mrs[0].Head)
 	assert.Equal(t, "myorg/myrepo", mrs[0].HeadRepo, "same source/target project id means the head lives in this repo")
 	assert.Equal(t, "MR Two", mrs[1].Title)
-	assert.Equal(t, "9", mrs[1].HeadRepo, "differing source project id means the head lives in a fork")
+	assert.Equal(t, "contributor/myrepo", mrs[1].HeadRepo, "differing source project id means the head lives in a fork, resolved to its owner/repo path")
 }
 
 func TestListRepoPullRequests_Author(t *testing.T) {

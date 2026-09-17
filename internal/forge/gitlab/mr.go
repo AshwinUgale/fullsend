@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -68,6 +67,9 @@ func (c *LiveClient) CreateCrossRepoChangeProposal(_ context.Context, _, _, _, _
 // ListRepoPullRequests lists open merge requests for a project with pagination.
 func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo string) ([]forge.ChangeProposal, error) {
 	var result []forge.ChangeProposal
+	// Cache source_project_id -> path_with_namespace within this call so
+	// multiple MRs from the same fork only trigger one lookup.
+	forkPaths := make(map[int]string)
 
 	for page := 1; page <= 100; page++ {
 		path := fmt.Sprintf("/projects/%s/merge_requests?state=opened&per_page=100&page=%d",
@@ -97,11 +99,24 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 			// This endpoint is scoped to owner/repo as the target project,
 			// so target_project_id always identifies it. When
 			// source_project_id matches, the head branch lives in the same
-			// project; otherwise it's a fork and headRepo won't match
-			// owner/repo, correctly marking it as not occupying our branch.
-			headRepo := strconv.Itoa(mr.SourceProjectID)
-			if mr.SourceProjectID == mr.TargetProjectID {
-				headRepo = owner + "/" + repo
+			// project. Otherwise it's a fork: the list endpoint only gives
+			// us the source project's numeric ID, so resolve it to the
+			// "owner/repo"-shaped path_with_namespace (the same shape
+			// GitHub uses, and what callers compare HeadRepo against) via
+			// an extra lookup — mirroring the pattern GetPullRequestInfo
+			// already uses to resolve a fork's source project.
+			headRepo := owner + "/" + repo
+			if mr.SourceProjectID != mr.TargetProjectID {
+				resolved, ok := forkPaths[mr.SourceProjectID]
+				if !ok {
+					resolved, err = c.resolveProjectPath(ctx, mr.SourceProjectID)
+					if err != nil {
+						return nil, fmt.Errorf("resolve source project %d for merge request !%d: %w",
+							mr.SourceProjectID, mr.IID, err)
+					}
+					forkPaths[mr.SourceProjectID] = resolved
+				}
+				headRepo = resolved
 			}
 			result = append(result, forge.ChangeProposal{
 				Number:   mr.IID,
@@ -120,6 +135,22 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 	}
 
 	return result, nil
+}
+
+// resolveProjectPath resolves a GitLab numeric project ID to its
+// "owner/repo"-shaped path_with_namespace.
+func (c *LiveClient) resolveProjectPath(ctx context.Context, projectID int) (string, error) {
+	resp, err := c.get(ctx, fmt.Sprintf("/projects/%d", projectID))
+	if err != nil {
+		return "", fmt.Errorf("get project %d: %w", projectID, err)
+	}
+	var proj struct {
+		PathWithNamespace string `json:"path_with_namespace"`
+	}
+	if err := decodeJSON(resp, &proj); err != nil {
+		return "", fmt.Errorf("decode project %d: %w", projectID, err)
+	}
+	return proj.PathWithNamespace, nil
 }
 
 // GetPullRequestInfo returns branch and repo context for a merge request.
