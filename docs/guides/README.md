@@ -15,7 +15,7 @@ Guides for onboarding organizations and configuring GitHub — the first thing m
 
 Guides for organization owners and repository administrators who manage fullsend installations.
 
-- [Operations](getting-started/operations.md) — Enrollment, configuration updates, status checks, uninstall, and standalone commands
+- [Operations](getting-started/operations.md) — Enrollment, configuration updates, status checks, uninstall, standalone commands, and [private-CA GitLab trust](getting-started/operations.md#private-ca-self-hosted-gitlab)
 - [Advanced setup](infrastructure/advanced-setup.md) — Alternative installation paths, setup flags, custom app sets, and manual WIF configuration
 - [OpenAI Workload Identity](infrastructure/openai-workload-identity.md) — Run GPT models on the pi runtime without a stored OpenAI key: console setup, repository variables, local runs, troubleshooting
 

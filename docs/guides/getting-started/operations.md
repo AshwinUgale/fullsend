@@ -207,8 +207,42 @@ On GitLab CI, the agent reads status notification context from standard CI/CD en
 | `CI_MERGE_REQUEST_IID` | When set, status comments target the merge request notes API instead of issues. |
 | `FULLSEND_GITLAB_URL` | Override for `GITLAB_API_URL` and `CI_SERVER_URL` (e.g., for self-hosted instances). |
 | `FULLSEND_NOTE_TARGET` | Set to `merge_requests` to force MR note targeting when `CI_MERGE_REQUEST_IID` is unavailable (e.g., child pipelines, scheduled jobs). |
+| `CI_SERVER_TLS_CA_FILE` | GitLab Runner predefined path to a job-local PEM CA bundle when `tls-ca-file` is set. Consumed by poll/agent jobs and the GitLab Go client. See [Private CA](#private-ca-self-hosted-gitlab). |
 
 `GITLAB_TOKEN` should be configured as a CI/CD variable with the **Masked** and **Protected** flags enabled in your GitLab project or group settings. Unlike GitHub (where tokens are minted at runtime and masked via `::add-mask::`), GitLab uses pre-provisioned tokens and relies on the runner-level masking configuration.
+
+## Private CA (self-hosted GitLab)
+
+Self-hosted GitLab instances that terminate TLS with a corporate or private CA need that CA in two **separate** places. A path that exists in the CI job container is not automatically present on a sandbox host.
+
+Fullsend never disables TLS verification (`GIT_SSL_NO_VERIFY`, `curl -k`, or Go `InsecureSkipVerify`). Untrusted certificates are rejected. Installations that do not set a custom CA continue to use the public trust store.
+
+### Job containers (poll and agent)
+
+GitLab Runner injects `CI_SERVER_TLS_CA_FILE` when `tls-ca-file` is set in the runner `config.toml`. That file is a job-local PEM bundle. Generated poll and agent jobs source `.gitlab/ci/scripts/trust-ci-server-ca.sh` before their first GitLab network operation, and the GitLab Go client also loads the same variable, so curl, git, and `fullsend` all trust the CA without per-tool configuration. Public CAs stay in the pool: the extra PEM is appended, not used as a replacement.
+
+Administrator contract:
+
+1. Install the corporate CA on the **runner** (the process that talks to GitLab and starts jobs), not only on nodes that happen to run other workloads.
+2. Point the runner at that bundle with [`tls-ca-file`](https://docs.gitlab.com/runner/configuration/tls-self-signed/) so GitLab Runner both verifies the GitLab server and sets `CI_SERVER_TLS_CA_FILE` in the job.
+3. Keep the generated `.gitlab/ci/fullsend-*.yml` templates (re-run `repos install` to converge). Do not unset or override `CI_SERVER_TLS_CA_FILE` as a pipeline variable.
+
+On the Kubernetes executor, `tls-ca-file` is still the contract. How the PEM gets onto the runner (host bind, ConfigMap volume, cluster-wide proxy CA) is an infrastructure choice; OpenShift-specific injection notes live with [#7406](https://github.com/fullsend-ai/fullsend/issues/7406). A volume mount of the CA into the job pod is not a substitute for `tls-ca-file` unless GitLab Runner also sets `CI_SERVER_TLS_CA_FILE`.
+
+If `CI_SERVER_TLS_CA_FILE` is set but the file is missing, unreadable, or not a PEM certificate bundle, the job and the Go client fail with a diagnostic naming that variable. Leave it unset on public-CA instances (including gitlab.com).
+
+Local `fullsend poll` / `fullsend run --forge gitlab` against a private-CA instance can set `CI_SERVER_TLS_CA_FILE` to a readable PEM path; the GitLab client will append it to the system pool.
+
+### Sandbox hosts
+
+OpenShell sandboxes do **not** inherit `CI_SERVER_TLS_CA_FILE`. That path is job-local and must not be treated as available inside the sandbox or on a remote gateway host. Agent-controlled TLS environment overrides (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) stay blocked.
+
+The OpenShell supervisor reads a fixed list of system CA paths in the sandbox container to build upstream trust (GitLab, registries, inference) and the bundle handed to sandboxed processes. Administrators provision that trust on the **sandbox host**, independently of the job container:
+
+- **fullsend GitLab Runner VMs** (`hack/gitlab-runner-vm/`): `setup.sh` installs the host CA (`install_ca_certs`) and an OCI `createRuntime` hook (`install_ca_hook`) that copies the host trust bundle into every container rootfs before PID 1 starts. That hook is specific to the Podman custom executor on those VMs. The Kubernetes job executor does not use it.
+- **Other sandbox hosts** (including a gateway used by the Kubernetes executor): install the corporate CA in the host trust store (and any equivalent OCI hook or image) so the supervisor can verify GitLab. Do not copy a job-container path into the sandbox configuration.
+
+A successful sandboxed agent run against the private-CA GitLab instance is the end-to-end check: poll jobs reach `/user`, agent jobs reach the GitLab API, and git/curl inside the sandbox reach GitLab through the supervisor's upstream trust.
 
 ## See Also
 

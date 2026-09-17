@@ -101,7 +101,9 @@ is set, the base URL falls back through `FULLSEND_GITLAB_URL` →
 `GITLAB_API_URL` → `CI_SERVER_URL`, defaulting to `gitlab.com` when
 none are set. You can also pass `--gitlab-url` to `fullsend repos install`
 to set `gitlab.url` in the manifest (this also implies `--forge=gitlab`
-when no forge is specified).
+when no forge is specified). Self-hosted instances that use a private CA
+need runner `tls-ca-file` plus separate sandbox-host trust — see
+[Private CA (self-hosted GitLab)](operations.md#private-ca-self-hosted-gitlab).
 
 Per-repo fields inherit from the platform-level default when omitted.
 To explicitly stop a field from inheriting, set it to the literal value
