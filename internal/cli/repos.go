@@ -65,14 +65,14 @@ func newReposMigrateCmd() *cobra.Command {
 For each repo enrolled in the org's per-org config (.fullsend config repo):
   1. Check inference WIF status; provision if needed
   2. Install per-repo (scaffold, variables, secrets) with config carried over
-  3. Unenroll from per-org config
+  3. Remove the repository entry from per-org config
 
 Generates a repos.yaml manifest reflecting the migrated state.
 
 Re-running after a partial migration picks up where it left off:
   - Already per-repo installed → skipped
   - Inference already provisioned → reuse existing WIF provider
-  - Already unenrolled → no-op
+  - Already removed from per-org config → no-op
 
 Individual repo failures do not abort the batch.
 
@@ -913,7 +913,7 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	// converged repos already have working bot tokens and schedules.
 	// Running on converged repos would revoke live bot PATs, breaking
 	// in-flight pipelines.
-	var postInstallFailed int
+	var installedPostFail int
 	if !opts.dryRun && len(installed) > 0 {
 		for _, r := range installed {
 			rc, ok := manifest.ResolveConfigWithGlobs(r.Owner, r.Repo)
@@ -927,20 +927,20 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			fc, fcErr := clients.ConfigFor(repos.ForgeGitLab)
 			if fcErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s] Could not get GitLab client: %v", repoFullName, fcErr))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 			glClient, ok := fc.Client.(*gl.LiveClient)
 			if !ok {
 				printer.StepWarn(fmt.Sprintf("[%s] GitLab client type assertion failed — bot token setup skipped", repoFullName))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 
 			_, botErr := setupGitLabBotToken(ctx, fc.Client, glClient, printer, r.Owner, r.Repo, opts.gitlabBotToken)
 			if botErr != nil {
 				printer.StepWarn(fmt.Sprintf("[%s] Bot token setup failed: %v", repoFullName, botErr))
-				postInstallFailed++
+				installedPostFail++
 				continue
 			}
 
@@ -959,11 +959,48 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 		}
 	}
 
+	// GitLab poll-state provisioning for already-enrolled repos.
+	// Fresh installs are handled above via repos.Install (Step 5b);
+	// converged and already-current repos still need
+	// FULLSEND_DISPATCH_SECRET and the two poll-state branches, with
+	// any legacy CI/CD variables migrated into signed documents. This
+	// runs with the operator's Maintainer-level client and never
+	// touches the bot PAT, so it is safe on live repos.
+	var pollStateFail int
+	var pollStateFailedRepos []repos.ConvergeResult
+	if !opts.dryRun {
+		existing := make([]repos.ConvergeResult, 0, len(converged)+len(alreadyCurrent))
+		existing = append(existing, converged...)
+		existing = append(existing, alreadyCurrent...)
+		for _, r := range existing {
+			rc, ok := manifest.ResolveConfigWithGlobs(r.Owner, r.Repo)
+			if !ok || rc.Forge != repos.ForgeGitLab {
+				continue
+			}
+			fc, fcErr := clients.ConfigFor(repos.ForgeGitLab)
+			if fcErr != nil {
+				printer.StepWarn(fmt.Sprintf("[%s/%s] Could not get GitLab client for poll-state provisioning: %v", r.Owner, r.Repo, fcErr))
+				pollStateFail++
+				r.Error = fcErr
+				pollStateFailedRepos = append(pollStateFailedRepos, r)
+				continue
+			}
+			if err := provisionGitLabPollState(ctx, fc.Client, printer, r.Owner, r.Repo); err != nil {
+				pollStateFail++
+				r.Error = err
+				pollStateFailedRepos = append(pollStateFailedRepos, r)
+			}
+		}
+	}
+
 	printer.Blank()
-	installedCount := len(installed) - postInstallFailed
-	failedCount := len(failed) + postInstallFailed
+	installedCount := len(installed) - installedPostFail
+	failedCount := len(failed) + installedPostFail + pollStateFail
 
 	for _, r := range failed {
+		printer.StepInfo(fmt.Sprintf("  FAILED: %s/%s — %v", r.Owner, r.Repo, r.Error))
+	}
+	for _, r := range pollStateFailedRepos {
 		printer.StepInfo(fmt.Sprintf("  FAILED: %s/%s — %v", r.Owner, r.Repo, r.Error))
 	}
 

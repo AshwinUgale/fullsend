@@ -46,9 +46,11 @@ fullsend repos migrate <org> --project <gcp-project> --dry-run
 
 The command discovers enrolled repos from the per-org config, provisions
 WIF infrastructure per repo, installs per-repo (scaffold, variables,
-secrets), unenrolls migrated repos from per-org config, and generates
-a `repos.yaml` manifest. If a manifest already exists, newly migrated
-repos are merged into it rather than overwriting it.
+secrets), removes migrated repository entries from the per-org config,
+and generates a `repos.yaml` manifest. If a manifest already exists,
+newly migrated repos are merged into it rather than overwriting it.
+Successful migrations delete the source config entry entirely rather
+than setting `enabled: false`.
 
 ### Creating a manifest from scratch
 
@@ -401,9 +403,11 @@ fullsend repos migrate <org> --project <gcp-project>
 
 This discovers enrolled repos from the per-org config, provisions WIF
 infrastructure, installs per-repo (scaffold, variables, secrets) with
-config carried over from the org config, unenrolls migrated repos,
-and writes `repos.yaml`. If a manifest already exists, new entries are
-merged in rather than overwriting it.
+config carried over from the org config, removes migrated repository
+entries from the per-org config, and writes `repos.yaml`. If a manifest
+already exists, new entries are merged in rather than overwriting it.
+Successful migrations delete the source config entry entirely rather
+than setting `enabled: false`.
 
 Preview first with `--dry-run`:
 

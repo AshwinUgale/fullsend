@@ -2,12 +2,14 @@ package repos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 )
 
@@ -106,6 +108,28 @@ func newFakeClientWithRepo() *forge.FakeClient {
 		DefaultBranch: "main",
 	}}
 	return fc
+}
+
+func assertPollStateBranchesSeeded(t *testing.T, fc *forge.FakeClient, owner, repo string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, branch := range []string{poll.PollStateBranchSlash, poll.PollStateBranchEvents} {
+		raw, err := fc.GetFileContentAtRef(ctx, owner, repo, poll.PollStateFileName, branch)
+		if err != nil {
+			t.Errorf("poll-state branch %s missing: %v", branch, err)
+			continue
+		}
+		var state struct {
+			HMAC string `json:"hmac"`
+		}
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Errorf("unmarshal %s: %v", branch, err)
+			continue
+		}
+		if state.HMAC == "" {
+			t.Errorf("%s: seeded state.json is unsigned", branch)
+		}
+	}
 }
 
 func TestInstall_FreshInstall_Direct(t *testing.T) {
@@ -972,9 +996,13 @@ func TestInstall_FreshInstall_GitLab(t *testing.T) {
 			t.Errorf("GitLab should not set %s", k)
 		}
 	}
-	if len(fc.CreatedSecrets) != 0 {
-		t.Errorf("expected 0 secrets for GitLab, got %d", len(fc.CreatedSecrets))
+	if len(fc.CreatedSecrets) != 1 {
+		t.Fatalf("expected 1 secret (FULLSEND_DISPATCH_SECRET) for GitLab, got %d", len(fc.CreatedSecrets))
 	}
+	if fc.CreatedSecrets[0].Name != forge.SecretDispatch {
+		t.Errorf("secret = %q, want %s", fc.CreatedSecrets[0].Name, forge.SecretDispatch)
+	}
+	assertPollStateBranchesSeeded(t, fc, "acme", "widgets")
 }
 
 func TestInstall_GitLab_SkipsWIFValidation(t *testing.T) {
@@ -1015,9 +1043,14 @@ func TestInstall_GitLab_ReuseSecrets(t *testing.T) {
 	if !result.Success {
 		t.Error("expected Success=true")
 	}
-	if len(fc.CreatedSecrets) != 0 {
-		t.Errorf("expected 0 secrets for GitLab ReuseSecrets, got %d", len(fc.CreatedSecrets))
+	// ReuseSecrets skips inference secrets, not FULLSEND_DISPATCH_SECRET.
+	if len(fc.CreatedSecrets) != 1 {
+		t.Fatalf("expected 1 secret (FULLSEND_DISPATCH_SECRET) for GitLab ReuseSecrets, got %d", len(fc.CreatedSecrets))
 	}
+	if fc.CreatedSecrets[0].Name != forge.SecretDispatch {
+		t.Errorf("secret = %q, want %s", fc.CreatedSecrets[0].Name, forge.SecretDispatch)
+	}
+	assertPollStateBranchesSeeded(t, fc, "acme", "widgets")
 }
 
 func TestInstallVarsForForge_GitLab_WithInference(t *testing.T) {
@@ -1126,6 +1159,10 @@ func TestInstall_GitLab_WithInference(t *testing.T) {
 	if secretMap["FULLSEND_GCP_WIF_PROVIDER"] != fakeWIFProvider {
 		t.Errorf("FULLSEND_GCP_WIF_PROVIDER = %q, want %q", secretMap["FULLSEND_GCP_WIF_PROVIDER"], fakeWIFProvider)
 	}
+	if secretMap[forge.SecretDispatch] == "" {
+		t.Error("expected FULLSEND_DISPATCH_SECRET to be provisioned")
+	}
+	assertPollStateBranchesSeeded(t, fc, "acme", "widgets")
 }
 
 func TestInstall_GitLab_WithInference_EmptyWIFProvider_Rejected(t *testing.T) {
@@ -1223,5 +1260,108 @@ func TestInstallSecretsForForge_GitHub_NoInferenceProject_NoSecrets(t *testing.T
 	secrets := installSecretsForForge(cfg, "")
 	if secrets != nil {
 		t.Errorf("expected nil secrets for GitHub without InferenceProject, got %v", secrets)
+	}
+}
+
+func TestInstall_GitLab_MigratesPreExistingLegacyVars(t *testing.T) {
+	fc := newFakeClientWithRepo()
+	// Pre-existing operator-written values that Install will overwrite
+	// when re-seeding the 7 vars, then fold the *new* values into the
+	// signed branch documents. The migration-from-live-history path is
+	// covered by SeedGitLabPollStateBranches tests; this asserts Install
+	// still creates both signed branches after writing vars.
+	fc.VariableValues["acme/widgets/"+forge.VarLastPollAtFast] = "2020-01-01T00:00:00Z"
+	cfg := InstallConfig{
+		Owner:  "acme",
+		Repo:   "widgets",
+		Forge:  ForgeGitLab,
+		Roles:  []string{"triage"},
+		Direct: true,
+	}
+	sc := &fakeScaffoldCommit{}
+	result, err := Install(context.Background(), cfg, fc, sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Install(GitLab) returned error: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success=true")
+	}
+	assertPollStateBranchesSeeded(t, fc, "acme", "widgets")
+
+	raw, err := fc.GetFileContentAtRef(context.Background(), "acme", "widgets", poll.PollStateFileName, poll.PollStateBranchSlash)
+	if err != nil {
+		t.Fatalf("slash branch: %v", err)
+	}
+	var slash struct {
+		LastPollAtFast string `json:"last_poll_at_fast"`
+	}
+	if err := json.Unmarshal(raw, &slash); err != nil {
+		t.Fatalf("unmarshal slash: %v", err)
+	}
+	if slash.LastPollAtFast == "" {
+		t.Error("slash watermark should be seeded from the install-time var")
+	}
+}
+
+func TestInstall_GitLab_DoesNotClobberExistingPollState(t *testing.T) {
+	fc := newFakeClientWithRepo()
+	existing := []byte(`{"last_poll_at_fast":"2025-06-01T00:00:00Z","hmac":"keep-me"}`)
+	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "widgets", poll.PollStateBranchSlash, poll.PollStateFileName, "prior", existing); err != nil {
+		t.Fatalf("seed existing slash: %v", err)
+	}
+	cfg := InstallConfig{
+		Owner:  "acme",
+		Repo:   "widgets",
+		Forge:  ForgeGitLab,
+		Roles:  []string{"triage"},
+		Direct: true,
+	}
+	sc := &fakeScaffoldCommit{}
+	if _, err := Install(context.Background(), cfg, fc, sc.fn(), noopProgress); err != nil {
+		t.Fatalf("Install(GitLab) returned error: %v", err)
+	}
+	got, err := fc.GetFileContentAtRef(context.Background(), "acme", "widgets", poll.PollStateFileName, poll.PollStateBranchSlash)
+	if err != nil {
+		t.Fatalf("slash: %v", err)
+	}
+	if string(got) != string(existing) {
+		t.Errorf("existing slash poll state was clobbered: %s", got)
+	}
+	if _, err := fc.GetFileContentAtRef(context.Background(), "acme", "widgets", poll.PollStateFileName, poll.PollStateBranchEvents); err != nil {
+		t.Errorf("events branch should have been created: %v", err)
+	}
+}
+
+func TestInstall_GitLab_SeedErrorFailsInstall(t *testing.T) {
+	fc := newFakeClientWithRepo()
+	fc.Errors["ForceCommitFileToBranch"] = fmt.Errorf("denied")
+	cfg := InstallConfig{
+		Owner:  "acme",
+		Repo:   "widgets",
+		Forge:  ForgeGitLab,
+		Roles:  []string{"triage"},
+		Direct: true,
+	}
+	sc := &fakeScaffoldCommit{}
+	_, err := Install(context.Background(), cfg, fc, sc.fn(), noopProgress)
+	if err == nil {
+		t.Fatal("expected install to fail when poll-state seeding fails")
+	}
+}
+
+func TestInstall_GitLab_DispatchSecretErrorFailsInstall(t *testing.T) {
+	fc := newFakeClientWithRepo()
+	fc.Errors["ListRepoVariables"] = fmt.Errorf("forbidden")
+	cfg := InstallConfig{
+		Owner:  "acme",
+		Repo:   "widgets",
+		Forge:  ForgeGitLab,
+		Roles:  []string{"triage"},
+		Direct: true,
+	}
+	sc := &fakeScaffoldCommit{}
+	_, err := Install(context.Background(), cfg, fc, sc.fn(), noopProgress)
+	if err == nil {
+		t.Fatal("expected install to fail when dispatch-secret provisioning fails")
 	}
 }

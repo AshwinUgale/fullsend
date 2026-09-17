@@ -165,7 +165,10 @@ Accepted
 > strips this specific obsolete rule from the root file in place
 > (`StripObsoleteGitLabWorkflowRules`, `internal/repos/gitlabci.go`),
 > leaving fullsend's current rules and all user configuration
-> untouched. See risk item 6 under Consequences.
+> untouched. See risk item 6 under Consequences. #7337 subsequently
+> dropped the leftover empty `dispatch` stage from the required stage
+> list and strips it from already-enrolled root files on converge
+> (`StripObsoleteGitLabStages`).
 
 ## Context
 
@@ -300,6 +303,15 @@ A Maintainer-role project access token with `api` scope, created during
 updates CI/CD variables (watermark and label state persistence) via the
 API, which requires Maintainer-level access. The bot PAT is stored as a
 protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
+
+> **Update (2026-09, #7343):** Poll-state persistence (watermarks,
+> dispatched/failed-key dedup, label state) moved off CI/CD variables
+> onto two per-mode, HMAC-signed `state.json` documents committed to
+> dedicated `fullsend-poll-state-slash`/`fullsend-poll-state-events`
+> branches (see "Watermark tampering" below). This is phase 2 of #7343
+> (Developer-PAT reduction); the Maintainer-role description above
+> remains accurate until a later phase actually drops the bot PAT to
+> Developer access.
 
 Key properties:
 
@@ -613,6 +625,13 @@ methods rather than adding forge-conditional logic.
 3. **Watermark tampering.** A Maintainer could skip or replay events by
    modifying the watermark variables. Mitigated by protected variable status
    and event deduplication.
+   > **Update (2026-09, #7343):** Poll state now lives on unprotected,
+   > Developer-writable `state.json` branches (see "Credential model"
+   > above) rather than protected CI/CD variables, so tampering is
+   > mitigated by an HMAC-SHA256 signature (`FULLSEND_DISPATCH_SECRET`,
+   > per-branch and per-project domain separation) instead: a Developer
+   > without the secret cannot forge state, and the poller fails closed
+   > (discarding the branch) on a missing or invalid signature.
 4. **Schedule modification.** A Maintainer could retarget the schedule to a
    non-protected branch. Mitigated by protected variable status (bot PAT
    not exposed on non-protected branches).

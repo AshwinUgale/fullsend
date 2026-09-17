@@ -14,6 +14,7 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/config"
 	"github.com/fullsend-ai/fullsend/internal/forge"
 	"github.com/fullsend-ai/fullsend/internal/maputil"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 )
 
@@ -239,6 +240,19 @@ func Install(ctx context.Context, cfg InstallConfig,
 		}
 	}
 	progress(repoFullName, "vars", fmt.Sprintf("Set %d repository variables", len(repoVars)))
+
+	// Step 5b: GitLab poll-state branches. Create both HMAC-signed
+	// state documents now, seeded from any legacy CI/CD vars just
+	// written (or already present) so the poller does not start from
+	// a missing-branch baseline. The 7 legacy vars stay until phase
+	// 3b (#7380) retires them.
+	if cfg.Forge == ForgeGitLab {
+		progress(repoFullName, "poll-state", "Seeding poll-state branches")
+		if err := seedGitLabPollState(ctx, client, cfg.Owner, cfg.Repo); err != nil {
+			return result, err
+		}
+		progress(repoFullName, "poll-state", "Poll-state branches seeded")
+	}
 
 	// Step 6: Write repository secrets. Skipped when reusing existing secrets.
 	repoSecrets := installSecretsForForge(cfg, wifProvider)
@@ -527,6 +541,21 @@ var gitlabRequiredVariables = []string{
 	forge.VarLastPollAtFast, forge.VarLastPollAtFull, forge.VarLabelState,
 	forge.VarDispatchedKeysFast, forge.VarDispatchedKeysFull,
 	forge.VarFailedKeysFast, forge.VarFailedKeysFull,
+}
+
+// seedGitLabPollState provisions FULLSEND_DISPATCH_SECRET if missing
+// and creates both poll-state branches with HMAC-signed state.json,
+// migrating any present legacy CI/CD variables. Idempotent: existing
+// signed documents are left untouched.
+func seedGitLabPollState(ctx context.Context, client forge.Client, owner, repo string) error {
+	secret, _, err := poll.EnsureDispatchSecret(ctx, client, owner, repo)
+	if err != nil {
+		return fmt.Errorf("provisioning dispatch secret: %w", err)
+	}
+	if _, err := poll.SeedGitLabPollStateBranches(ctx, client, owner, repo, secret); err != nil {
+		return fmt.Errorf("seeding poll-state branches: %w", err)
+	}
+	return nil
 }
 
 func requiredVarsForForge(forgeName string) []string {

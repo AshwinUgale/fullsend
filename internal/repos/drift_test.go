@@ -308,6 +308,7 @@ func TestCheckOrphanVars_GitLabSecretsNotFlagged(t *testing.T) {
 	fc.VariableValues["owner/repo/"+forge.SecretGCPProjectID] = "my-project"
 	fc.VariableValues["owner/repo/"+forge.SecretGCPWIFProvider] = "projects/123/locations/global/workloadIdentityPools/pool/providers/prov"
 	fc.VariableValues["owner/repo/"+forge.SecretForgeToken] = "glpat-secret"
+	fc.VariableValues["owner/repo/"+forge.SecretDispatch] = "dispatch-secret"
 
 	cfg := InstallConfig{Forge: ForgeGitLab}
 	orphans, err := CheckOrphanVars(

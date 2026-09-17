@@ -30,7 +30,9 @@ One-command migration from per-org to per-repo fullsend installation. For each r
 
 1. Check inference WIF status; provision if needed
 2. Install per-repo (scaffold workflows, variables, secrets) with config carried over from the org config
-3. Unenroll from per-org config
+3. Remove the repository entry from per-org config
+
+Successfully migrated repositories — and selected repositories already detected as per-repo installed — are deleted from the source `<org>/.fullsend/config.yaml`. They are not left as `enabled: false`, which would queue them for legacy offboarding. Failed, unselected, and pre-existing disabled entries are left unchanged, as is unrelated configuration. Dry runs do not modify the source config.
 
 Generates a `repos.yaml` manifest reflecting the migrated state. When a `repos.yaml` already exists (e.g. from a previous `--repo`-filtered run), newly migrated repos are merged into it instead of overwriting it. Re-running after a partial migration picks up where it left off.
 
@@ -127,6 +129,8 @@ When repos are specified as positional arguments, only those repos are processed
 ### GitLab bot token
 
 For GitLab repos, `repos install` automatically creates a project access token and stores it as the `FULLSEND_FORGE_TOKEN` protected CI/CD variable. Creating project access tokens requires GitLab Premium or Ultimate.
+
+Install and converge also provision `FULLSEND_DISPATCH_SECRET` (a masked, protected CI/CD variable used to HMAC-sign dispatch variables and poller state) and create two unprotected poll-state branches (`fullsend-poll-state-slash` and `fullsend-poll-state-events`) holding an initial signed `state.json`. Existing `FULLSEND_LAST_POLL_AT_*` / `FULLSEND_LABEL_STATE` / `FULLSEND_DISPATCHED_KEYS_*` / `FULLSEND_FAILED_KEYS_*` values are migrated into those documents when present; otherwise each branch is seeded with an empty signed baseline. Already-written branch state is left untouched.
 
 On free-tier or Community Edition instances where project access tokens are not available, pass `--gitlab-bot-token` with a personal access token (PAT) that has `api` scope:
 
