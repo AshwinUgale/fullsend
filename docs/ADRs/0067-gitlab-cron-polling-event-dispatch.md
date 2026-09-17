@@ -311,8 +311,8 @@ protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
 >
 > | Branch | Written by | Fields |
 > |---|---|---|
-> | `fullsend-poll-state-slash` | slash poll (`*/5`) | `LastPollAtFast`, `DispatchedKeysFast`, `FailedKeysFast` |
-> | `fullsend-poll-state-events` | event poll (`2,17,32,47`) | `LastPollAtFull`, `DispatchedKeysFull`, `FailedKeysFull`, `LabelState` |
+> | `fullsend-poll-state-slash` | slash poll (`*/5`) | `last_poll_at_fast`, `dispatched_keys_fast`, `failed_keys_fast`, `hmac` |
+> | `fullsend-poll-state-events` | event poll (`2,17,32,47`) | `last_poll_at_full`, `dispatched_keys_full`, `failed_keys_full`, `label_state`, `hmac` |
 >
 > Two branches keep concurrent slash+events runs from clobbering each
 > other (each mode has its own `resource_group`, but the two modes can
@@ -632,8 +632,11 @@ injection > insider > drift > supply chain):
   > **Update (2026-09, #7343):** Poll watermarks are no longer CI/CD
   > variables. Persistence uses `GetFileContentAtRef` /
   > `ForceCommitFileToBranch` / `DeleteRef` on the two poll-state
-  > branches. `UpdateCIVariable` remains on `forge.Client` for other
-  > CI/CD-variable operations (for example `FULLSEND_FORGE_TOKEN`).
+  > branches. Credential and secret writes (`FULLSEND_FORGE_TOKEN`,
+  > `FULLSEND_DISPATCH_SECRET`) use `CreateRepoSecret`, not
+  > `UpdateCIVariable`. `UpdateCIVariable` has no production callers;
+  > it remains on `forge.Client` only for non-credential CI/CD-variable
+  > operations, should any be added.
 
 A new `ErrNotSupported` sentinel (complementing the existing forge
 sentinel errors) allows forge
