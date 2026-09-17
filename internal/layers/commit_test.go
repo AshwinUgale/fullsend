@@ -1362,7 +1362,7 @@ func TestCommitScaffoldViaPR_ExistingOwnPRLeavesBranch(t *testing.T) {
 	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
 	client.PullRequests = map[string][]forge.ChangeProposal{
 		"acme/widget": {
-			{Number: 7, Title: "scaffold", Head: "fullsend/scaffold-install", Base: "main", Author: "acme"},
+			{Number: 7, Title: "scaffold", Head: "fullsend/scaffold-install", HeadRepo: "acme/widget", Base: "main", Author: "acme"},
 		},
 	}
 	printer, _ := newTestPrinter()
@@ -1382,7 +1382,7 @@ func TestCommitScaffoldViaPR_ForeignOpenPRLeavesBranch(t *testing.T) {
 	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
 	client.PullRequests = map[string][]forge.ChangeProposal{
 		"acme/widget": {
-			{Number: 9, Title: "scaffold", Head: "fullsend/scaffold-install", Base: "main", Author: "outsider"},
+			{Number: 9, Title: "scaffold", Head: "fullsend/scaffold-install", HeadRepo: "acme/widget", Base: "main", Author: "outsider"},
 		},
 	}
 	printer, buf := newTestPrinter()
@@ -1402,7 +1402,7 @@ func TestCommitScaffoldViaPR_EmptyAuthorOpenPRLeavesBranch(t *testing.T) {
 	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
 	client.PullRequests = map[string][]forge.ChangeProposal{
 		"acme/widget": {
-			{Number: 11, Title: "scaffold", Head: "fullsend/scaffold-install", Base: "main", Author: ""},
+			{Number: 11, Title: "scaffold", Head: "fullsend/scaffold-install", HeadRepo: "acme/widget", Base: "main", Author: ""},
 		},
 	}
 	printer, buf := newTestPrinter()
@@ -1418,6 +1418,8 @@ func TestCommitScaffoldViaPR_EmptyAuthorOpenPRLeavesBranch(t *testing.T) {
 
 func TestRecreateStaleScaffoldBranch_ListErrorLeavesBranch(t *testing.T) {
 	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "acme"
+	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
 	client.Errors["ListRepoPullRequests"] = fmt.Errorf("API rate limit")
 	printer, buf := newTestPrinter()
 
@@ -1426,14 +1428,23 @@ func TestRecreateStaleScaffoldBranch_ListErrorLeavesBranch(t *testing.T) {
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
 		func() error { created++; return nil })
 	require.NoError(t, err)
-	assert.True(t, proceed, "cannot verify ownership from a list error, so fall back to committing as before")
+	assert.False(t, proceed, "cannot verify ownership from a list error, so fail closed")
 	assert.Equal(t, 0, created)
 	assert.Empty(t, client.DeletedBranches)
 	assert.Contains(t, buf.String(), "Could not check open PRs")
+
+	// The caller (commitBranchAndPR) must also treat proceed=false as a
+	// hard stop and never commit onto the branch it couldn't verify.
+	_, err = commitBranchAndPR(context.Background(), client, printer,
+		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "main",
+		"msg", "title", "body", testFiles)
+	require.NoError(t, err)
+	assert.Empty(t, client.CommittedFilesToBranch, "cannot verify ownership from a list error, so must not commit either")
 }
 
 func TestRecreateStaleScaffoldBranch_EmptyUserLeavesBranch(t *testing.T) {
 	client := forge.NewFakeClient()
+	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
 	printer, buf := newTestPrinter()
 
 	created := 0
@@ -1441,10 +1452,18 @@ func TestRecreateStaleScaffoldBranch_EmptyUserLeavesBranch(t *testing.T) {
 		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "",
 		func() error { created++; return nil })
 	require.NoError(t, err)
-	assert.True(t, proceed, "cannot verify ownership without an authenticated user, so fall back to committing as before")
+	assert.False(t, proceed, "cannot verify ownership without an authenticated user, so fail closed")
 	assert.Equal(t, 0, created)
 	assert.Empty(t, client.DeletedBranches)
 	assert.Contains(t, buf.String(), "ownership")
+
+	// The caller (commitBranchAndPR) must also treat proceed=false as a
+	// hard stop and never commit onto the branch it couldn't verify.
+	_, err = commitBranchAndPR(context.Background(), client, printer,
+		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "main",
+		"msg", "title", "body", testFiles)
+	require.NoError(t, err)
+	assert.Empty(t, client.CommittedFilesToBranch, "cannot verify ownership without an authenticated user, so must not commit either")
 }
 
 func TestRecreateStaleScaffoldBranch_DeleteErrorLeavesBranch(t *testing.T) {
@@ -1494,7 +1513,10 @@ func TestRecreateStaleScaffoldBranch_CrossForkHeadFormat(t *testing.T) {
 	client := forge.NewFakeClient()
 	client.PullRequests = map[string][]forge.ChangeProposal{
 		"acme/widget": {
-			{Number: 3, Title: "scaffold", Head: "contributor:fullsend/scaffold-install", Base: "main", Author: "contributor"},
+			// Live GitHub/GitLab APIs report the head as a bare ref plus a
+			// separate repo identifier, never "owner:branch" — HeadRepo is
+			// what ties this PR to the fork we're committing to.
+			{Number: 3, Title: "scaffold", Head: "fullsend/scaffold-install", HeadRepo: "contributor/widget", Base: "main", Author: "contributor"},
 		},
 	}
 	printer, _ := newTestPrinter()
@@ -1505,6 +1527,30 @@ func TestRecreateStaleScaffoldBranch_CrossForkHeadFormat(t *testing.T) {
 		func() error { created++; return nil })
 	require.NoError(t, err)
 	assert.True(t, proceed, "own open PR should update in place, not skip the commit")
-	assert.Equal(t, 0, created, "own open PR with owner:branch head should update in place")
+	assert.Equal(t, 0, created, "own open PR should update in place rather than being recreated")
 	assert.Empty(t, client.DeletedBranches)
+}
+
+func TestRecreateStaleScaffoldBranch_UnrelatedForkSameNameIgnored(t *testing.T) {
+	client := forge.NewFakeClient()
+	client.ExistingBranches["acme/widget/fullsend/scaffold-install"] = true
+	client.PullRequests = map[string][]forge.ChangeProposal{
+		"acme/widget": {
+			// Same branch name as our predictable scaffold branch, but it
+			// lives in an unrelated fork — it must not be mistaken for a
+			// PR occupying acme/widget's branch.
+			{Number: 42, Title: "unrelated", Head: "fullsend/scaffold-install", HeadRepo: "someone-else/widget", Base: "main", Author: "someone-else"},
+		},
+	}
+	printer, buf := newTestPrinter()
+
+	created := 0
+	proceed, err := recreateStaleScaffoldBranch(context.Background(), client, printer,
+		"acme", "widget", "acme", "widget", "fullsend/scaffold-install", "acme",
+		func() error { created++; return nil })
+	require.NoError(t, err)
+	assert.True(t, proceed, "an unrelated fork PR sharing the branch name doesn't occupy our target repo's branch")
+	assert.Equal(t, 1, created, "the leftover branch in our own repo should still be deleted and recreated")
+	assert.Equal(t, []string{"acme/widget/fullsend/scaffold-install"}, client.DeletedBranches)
+	assert.NotContains(t, buf.String(), "not authored by acme")
 }

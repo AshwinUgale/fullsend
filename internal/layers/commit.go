@@ -314,10 +314,11 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 			return false, recErr
 		}
 		if !proceed {
-			// A foreign or empty-author open PR already uses this
-			// predictable branch. The fail-closed ownership check left
-			// the branch in place — do not commit onto infrastructure we
-			// don't own.
+			// Either a foreign/empty-author open PR already uses this
+			// predictable branch, or ownership could not be verified at
+			// all (no authenticated user, or listing PRs failed). Either
+			// way the fail-closed ownership check left the branch in
+			// place — do not commit onto infrastructure we don't own.
 			return false, nil
 		}
 	}
@@ -375,27 +376,32 @@ func commitBranchAndPR(ctx context.Context, client forge.Client, printer *ui.Pri
 // replacing it. The branch is only deleted when no open PR uses it.
 //
 // When ownership cannot be determined at all (authenticatedUser is empty,
-// or listing PRs fails), this falls back to the pre-existing behavior of
-// leaving the branch in place and letting the caller commit onto it —
-// the same as before this function existed — since there is no signal of
-// a competing PR to fail closed against.
+// or listing PRs fails), this fails closed too: proceedToCommit is false
+// and the branch is left in place, since there is no way to distinguish
+// "no competing PR" from "a competing PR exists but we can't see it."
 func recreateStaleScaffoldBranch(ctx context.Context, client forge.Client, printer *ui.Printer,
 	upstreamOwner, upstreamRepo, targetOwner, targetRepo, scaffoldBranch, authenticatedUser string,
 	createBranch func() error) (proceedToCommit bool, err error) {
 
 	if authenticatedUser == "" {
 		printer.StepWarn("Could not verify scaffold branch ownership; leaving existing branch in place")
-		return true, nil
+		return false, nil
 	}
 
 	prs, err := client.ListRepoPullRequests(ctx, upstreamOwner, upstreamRepo)
 	if err != nil {
 		printer.StepWarn(fmt.Sprintf("Could not check open PRs before replacing scaffold branch: %v", err))
-		return true, nil
+		return false, nil
 	}
 
+	targetRepoFullName := targetOwner + "/" + targetRepo
 	for _, pr := range prs {
-		if pr.Head != scaffoldBranch && pr.Head != targetOwner+":"+scaffoldBranch {
+		if pr.Head != scaffoldBranch {
+			continue
+		}
+		if !strings.EqualFold(pr.HeadRepo, targetRepoFullName) {
+			// Same branch name, different (e.g. unrelated fork) repo — it
+			// isn't occupying the branch we're about to delete/recreate.
 			continue
 		}
 		if pr.Author == "" || !strings.EqualFold(pr.Author, authenticatedUser) {

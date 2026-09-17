@@ -433,18 +433,22 @@ func TestListRepoPullRequests(t *testing.T) {
 
 		writeJSON(t, w, http.StatusOK, []map[string]any{
 			{
-				"iid":           1,
-				"title":         "MR One",
-				"web_url":       "https://gitlab.com/myorg/myrepo/-/merge_requests/1",
-				"source_branch": "branch-1",
-				"target_branch": "main",
+				"iid":               1,
+				"title":             "MR One",
+				"web_url":           "https://gitlab.com/myorg/myrepo/-/merge_requests/1",
+				"source_branch":     "branch-1",
+				"target_branch":     "main",
+				"source_project_id": 5,
+				"target_project_id": 5,
 			},
 			{
-				"iid":           2,
-				"title":         "MR Two",
-				"web_url":       "https://gitlab.com/myorg/myrepo/-/merge_requests/2",
-				"source_branch": "branch-2",
-				"target_branch": "main",
+				"iid":               2,
+				"title":             "MR Two",
+				"web_url":           "https://gitlab.com/myorg/myrepo/-/merge_requests/2",
+				"source_branch":     "branch-2",
+				"target_branch":     "main",
+				"source_project_id": 9,
+				"target_project_id": 5,
 			},
 		})
 	})
@@ -454,7 +458,9 @@ func TestListRepoPullRequests(t *testing.T) {
 	require.Len(t, mrs, 2)
 	assert.Equal(t, "MR One", mrs[0].Title)
 	assert.Equal(t, "branch-1", mrs[0].Head)
+	assert.Equal(t, "myorg/myrepo", mrs[0].HeadRepo, "same source/target project id means the head lives in this repo")
 	assert.Equal(t, "MR Two", mrs[1].Title)
+	assert.Equal(t, "9", mrs[1].HeadRepo, "differing source project id means the head lives in a fork")
 }
 
 func TestListRepoPullRequests_Author(t *testing.T) {

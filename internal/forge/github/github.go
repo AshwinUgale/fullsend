@@ -1984,7 +1984,10 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 			Title   string `json:"title"`
 			Number  int    `json:"number"`
 			Head    struct {
-				Ref string `json:"ref"`
+				Ref  string `json:"ref"`
+				Repo struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
 			} `json:"head"`
 			Base struct {
 				Ref string `json:"ref"`
@@ -1999,12 +2002,13 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 
 		for _, pr := range prs {
 			result = append(result, forge.ChangeProposal{
-				URL:    pr.HTMLURL,
-				Title:  pr.Title,
-				Number: pr.Number,
-				Head:   pr.Head.Ref,
-				Base:   pr.Base.Ref,
-				Author: pr.User.Login,
+				URL:      pr.HTMLURL,
+				Title:    pr.Title,
+				Number:   pr.Number,
+				Head:     pr.Head.Ref,
+				HeadRepo: pr.Head.Repo.FullName,
+				Base:     pr.Base.Ref,
+				Author:   pr.User.Login,
 			})
 		}
 

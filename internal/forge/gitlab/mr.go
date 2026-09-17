@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
@@ -77,12 +78,14 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 		}
 
 		var mrs []struct {
-			IID          int    `json:"iid"`
-			Title        string `json:"title"`
-			WebURL       string `json:"web_url"`
-			SourceBranch string `json:"source_branch"`
-			TargetBranch string `json:"target_branch"`
-			Author       struct {
+			IID             int    `json:"iid"`
+			Title           string `json:"title"`
+			WebURL          string `json:"web_url"`
+			SourceBranch    string `json:"source_branch"`
+			TargetBranch    string `json:"target_branch"`
+			SourceProjectID int    `json:"source_project_id"`
+			TargetProjectID int    `json:"target_project_id"`
+			Author          struct {
 				Username string `json:"username"`
 			} `json:"author"`
 		}
@@ -91,13 +94,23 @@ func (c *LiveClient) ListRepoPullRequests(ctx context.Context, owner, repo strin
 		}
 
 		for _, mr := range mrs {
+			// This endpoint is scoped to owner/repo as the target project,
+			// so target_project_id always identifies it. When
+			// source_project_id matches, the head branch lives in the same
+			// project; otherwise it's a fork and headRepo won't match
+			// owner/repo, correctly marking it as not occupying our branch.
+			headRepo := strconv.Itoa(mr.SourceProjectID)
+			if mr.SourceProjectID == mr.TargetProjectID {
+				headRepo = owner + "/" + repo
+			}
 			result = append(result, forge.ChangeProposal{
-				Number: mr.IID,
-				URL:    mr.WebURL,
-				Title:  mr.Title,
-				Head:   mr.SourceBranch,
-				Base:   mr.TargetBranch,
-				Author: mr.Author.Username,
+				Number:   mr.IID,
+				URL:      mr.WebURL,
+				Title:    mr.Title,
+				Head:     mr.SourceBranch,
+				HeadRepo: headRepo,
+				Base:     mr.TargetBranch,
+				Author:   mr.Author.Username,
 			})
 		}
 

@@ -217,8 +217,14 @@ type ChangeProposal struct {
 	Title  string
 	Number int
 	Head   string
-	Base   string
-	Author string // login of the user who opened the PR/MR
+	// HeadRepo identifies the repository the head branch lives in, as
+	// "owner/repo" (GitHub) or a project identifier (GitLab). Empty when
+	// the forge doesn't report it (e.g. a deleted fork). Used to tell a
+	// same-named branch in an unrelated fork apart from one in the repo
+	// actually being checked, since Head alone is just a bare ref name.
+	HeadRepo string
+	Base     string
+	Author   string // login of the user who opened the PR/MR
 }
 
 // PullRequestInfo carries branch/repo context for dispatch enrichment.

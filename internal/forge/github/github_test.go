@@ -1164,7 +1164,7 @@ func TestListRepoPullRequests(t *testing.T) {
 				"html_url": "https://github.com/owner/repo/pull/1",
 				"title":    "PR 1",
 				"number":   1,
-				"head":     map[string]any{"ref": "feature-branch"},
+				"head":     map[string]any{"ref": "feature-branch", "repo": map[string]any{"full_name": "owner/repo"}},
 				"base":     map[string]any{"ref": "main"},
 				"user":     map[string]any{"login": "alice"},
 			},
@@ -1172,7 +1172,7 @@ func TestListRepoPullRequests(t *testing.T) {
 				"html_url": "https://github.com/owner/repo/pull/2",
 				"title":    "PR 2",
 				"number":   2,
-				"head":     map[string]any{"ref": "fix-branch"},
+				"head":     map[string]any{"ref": "fix-branch", "repo": map[string]any{"full_name": "contributor/repo"}},
 				"base":     map[string]any{"ref": "main"},
 				"user":     map[string]any{"login": "bob"},
 			},
@@ -1186,10 +1186,12 @@ func TestListRepoPullRequests(t *testing.T) {
 	require.Len(t, prs, 2)
 	assert.Equal(t, "PR 1", prs[0].Title)
 	assert.Equal(t, "feature-branch", prs[0].Head)
+	assert.Equal(t, "owner/repo", prs[0].HeadRepo)
 	assert.Equal(t, "main", prs[0].Base)
 	assert.Equal(t, "alice", prs[0].Author)
 	assert.Equal(t, 2, prs[1].Number)
 	assert.Equal(t, "fix-branch", prs[1].Head)
+	assert.Equal(t, "contributor/repo", prs[1].HeadRepo)
 	assert.Equal(t, "bob", prs[1].Author)
 }
 
