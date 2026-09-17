@@ -93,6 +93,13 @@ func ListTriggeredHarnesses(ctx context.Context, configDir string, cfg config.Co
 		}
 		out = append(out, TriggeredHarness{Name: agent.Name, Harness: h, Path: resolved.Path})
 	}
+	// Each failure above was already written as a ::error:: annotation, and
+	// its text is also folded into the aggregated error returned here. That
+	// duplication is intentional for the total-failure case: the
+	// annotations surface inline in the GitHub Actions UI next to the step
+	// that produced them, while the aggregated error drives dispatch's
+	// non-zero exit and appears in the plain-text CI log/exit trace. Partial
+	// failures (loaded > 0) keep the annotation-only behavior unchanged.
 	if loaded == 0 && len(loadErrs) > 0 {
 		return nil, fmt.Errorf("no agents could be loaded: %w", errors.Join(loadErrs...))
 	}
