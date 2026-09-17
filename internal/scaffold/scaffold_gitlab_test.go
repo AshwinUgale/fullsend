@@ -17,6 +17,7 @@ func TestGitLabPerRepoFilesExist(t *testing.T) {
 		".gitlab/ci/fullsend-dispatch.yml",
 		".gitlab/ci/fullsend-poll.yml",
 		".gitlab/ci/fullsend-agent.yml",
+		".gitlab/ci/scripts/trust-ci-server-ca.sh",
 	}
 
 	for _, path := range expected {
@@ -228,6 +229,8 @@ func TestGitLabAgentTemplateContent(t *testing.T) {
 	assert.Contains(t, s, "before_script:")
 	// CI_DEBUG_TRACE guard must be in before_script, before token-bearing commands
 	assert.Contains(t, s, "CI_DEBUG_TRACE")
+	// Private-CA trust from CI_SERVER_TLS_CA_FILE before GitLab network ops.
+	assert.Contains(t, s, "trust-ci-server-ca.sh")
 	assert.Contains(t, s, "__FULLSEND_VERSION__")
 	assert.Contains(t, s, "fullsend-ai/fullsend")
 	assert.Contains(t, s, "fullsend --version")
@@ -462,6 +465,8 @@ func TestGitLabPollContent(t *testing.T) {
 	assert.Contains(t, s, "checksums.txt")
 	assert.Contains(t, s, "sha256sum -c")
 	assert.Contains(t, s, "releases/latest")
+	// Private-CA trust from CI_SERVER_TLS_CA_FILE before GitLab network ops.
+	assert.Contains(t, s, "trust-ci-server-ca.sh")
 	// Source-build path sets GOPATH and GOCACHE so go build works on
 	// non-root runners where /root/go is not writable (#6477).
 	assert.Contains(t, s, `export GOPATH="${RUNNER_TEMP:-/tmp}/go"`)

@@ -613,6 +613,8 @@ GitLab supports [multi-project pipelines](https://docs.gitlab.com/ee/ci/pipeline
 - Implementation PR for GitLab runner setup (for executor configuration)
 - Deployment guide (for runner registration and management)
 
+Private-CA trust is split the same way: job containers consume GitLab Runner's `CI_SERVER_TLS_CA_FILE`, while sandbox hosts are provisioned independently (the Kubernetes executor does not inherit the Podman VM OCI CA hook). See [Private CA (self-hosted GitLab)](../guides/getting-started/operations.md#private-ca-self-hosted-gitlab).
+
 **Assumption**: Agents will execute in isolated environments (containers or VMs) managed by GitLab runners, similar to the current GitHub Actions model. The dispatch pipelines (covered in this doc) trigger agent jobs; the agent execution details are implementation-specific.
 
 ## References

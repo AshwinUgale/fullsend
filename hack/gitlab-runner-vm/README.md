@@ -20,7 +20,12 @@ Each runner VM runs:
 
 Job containers use `--network=host` to reach the gateway. An OCI
 `createRuntime` hook injects the host CA trust bundle into every container
-(Debian and RHEL-family layouts) so jobs can verify internal TLS endpoints.
+(Debian and RHEL-family layouts) so the OpenShell supervisor and sandboxed
+processes can verify internal TLS endpoints. That hook is the **sandbox-host**
+half of private-CA support; GitLab job containers separately consume
+`CI_SERVER_TLS_CA_FILE` (see [Private CA (self-hosted GitLab)](../../docs/guides/getting-started/operations.md#private-ca-self-hosted-gitlab)).
+The Kubernetes executor does not run this hook — do not treat a job-local
+`CI_SERVER_TLS_CA_FILE` path as available on a remote sandbox host.
 Gateway mTLS credentials are mounted read-only from the runner user's
 OpenShell config. `prepare.sh` reaps leftover `openshell-*` / `openshell.managed`
 containers from an abruptly-killed prior job before starting the new gateway.
