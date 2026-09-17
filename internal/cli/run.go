@@ -2331,6 +2331,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		close(heartbeatDone)
 		lastIterElapsed = time.Since(agentStart)
 
+		// The stream is over: end unanswered calls now, ahead of content
+		// assembly, whose redaction pass would otherwise sit inside their
+		// spans. finalizeAgentSpan's Finish still reports the overflow.
+		toolSpans.Finish()
+
 		// Attach content immediately before each finalize path ends the
 		// span, carrying the schema-required finish_reason from the
 		// iteration outcome. A failed iteration keeps its content — that
@@ -3759,9 +3764,9 @@ func finalizeRootSpan(span trace.Span, runErr error, exitCode int, validationPas
 	span.End()
 }
 
-// recordToolSpanOverflow marks an agent span whose iteration reported more
-// tool calls than the tracker records (maxToolSpansPerIteration), so a
-// consumer can tell a partial execute_tool set from a complete one.
+// recordToolSpanOverflow marks an agent span whose iteration had id-bearing
+// tool calls refused a span at the cap (maxToolSpansPerIteration), so a
+// consumer can tell a capped execute_tool set from an uncapped one.
 func recordToolSpanOverflow(span trace.Span, dropped int) {
 	if dropped > 0 {
 		span.SetAttributes(attribute.Int("fullsend.tool_spans.dropped", dropped))

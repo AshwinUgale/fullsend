@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -14,8 +15,8 @@ import (
 
 // maxToolSpansPerIteration bounds how many execute_tool spans one iteration
 // may record. The count of calls is under the sandboxed agent's control,
-// and Finish ends every open call in a burst right before the agent span
-// ends: the OTLP batch processor's queue (2048 by default) drops newest
+// and Finish ends every open call in a burst when the stream ends, before
+// the agent span ends: the OTLP batch processor's queue (2048 by default) drops newest
 // spans when full, so an unbounded burst would evict the agent span — the
 // one carrying the iteration's content. Half the queue leaves room for the
 // rest of the trace (the PR's evidence review run made 47 calls). This
@@ -41,14 +42,24 @@ const maxToolSpanNameBytes = 128
 // spans are Level 1 metadata and are emitted whether or not the content
 // gate is on.
 //
-// A span starts when the ToolUseEvent arrives and ends when the matching
-// ToolResultEvent arrives, so both timestamps are runner-side receipt instants
+// A span starts when the tracker handles the ToolUseEvent and ends when it
+// handles the matching ToolResultEvent. iterationEventHandler runs the
+// console renderer first (it prints for a call, nothing for a result), then
+// this tracker, then the Level 3 collector, so the collector's redaction pass
+// over an event never delays that event's own stamp. Events are handled one
+// at a time: with several calls open, a stamp can still trail the collector's
+// pass over an event queued ahead of it. Both timestamps are runner-side
+// receipt instants
 // on the parent agent span's clock — no cross-host skew, and the one source
 // every runtime provides (Claude Code's tool_use and tool_result lines carry
 // sandbox-clock timestamps the parser does not decode; pi's tool-execution
-// lines and codex's items carry none). The cost is bracketing: tool_use
-// arrival is arguments-complete rather than execution start, and tool_result
-// arrival trails execution end by the pipe latency. Calls are keyed by id
+// lines and codex's items carry none). The cost is loose timing in both
+// directions: tool_use arrival is arguments-complete rather than execution
+// start (early), but its stamp also trails the pipe, the parser's decode, the
+// renderer's print and any event queued ahead of it (late), and tool_result
+// arrival trails execution end by the pipe latency and the parser's decode of
+// the line — so a span can be shorter than the execution it covers as well as
+// longer. Calls are keyed by id
 // because the stream interleaves several open calls (parallel sub-agent
 // dispatch); a call that never gets a result — the runtime was stopped, or its
 // over-long result line showed no id in the prefix the parser keeps — is ended
@@ -58,8 +69,10 @@ const maxToolSpanNameBytes = 128
 // answered and its is_error was never decoded; and a result whose call was
 // never seen (its tool_use line was skipped) becomes a marked span of
 // near-zero duration. Events
-// without an id — pi and codex emit none, and server-side tools get none
-// because their result never arrives as a tool_result — produce no span. The
+// without an id — pi and codex emit none — produce no span, and neither does
+// a server-side tool: its result never arrives as a tool_result, so the parser
+// reports it without an id (stream_event lines) or not at all (assistant
+// lines, the live path). The
 // name and the call id go through the same output pipeline as span content
 // (Unicode normalization, then secret redaction): the name is bounded, the id
 // is dropped on any finding (safeID) — both land on a Level 1 span in the
@@ -182,6 +195,9 @@ func (t *toolSpanTracker) safeID(id string) string {
 }
 
 func (t *toolSpanTracker) start(id, name string) trace.Span {
+	// Stamped before the scans below: the name is sanitized at full length
+	// and bounded only afterwards, so their cost is the stream's to set.
+	now := time.Now()
 	attrs := []attribute.KeyValue{attribute.String("gen_ai.operation.name", "execute_tool")}
 	if safe := t.safeID(id); safe != "" {
 		attrs = append(attrs, stringAttr("gen_ai.tool.call.id", safe))
@@ -194,7 +210,7 @@ func (t *toolSpanTracker) start(id, name string) trace.Span {
 		attrs = append(attrs, attribute.String("gen_ai.tool.name", name))
 		spanName += " " + strings.ToValidUTF8(truncateStatusMsgTo(name, maxToolSpanNameBytes), "")
 	}
-	_, span := t.tracer.Start(t.ctx, spanName,
+	_, span := t.tracer.Start(t.ctx, spanName, trace.WithTimestamp(now),
 		trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 	return span
 }

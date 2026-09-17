@@ -97,7 +97,7 @@ silently.
 run (root)
 ├── sandbox_create    (gen_ai.operation.name=create_agent)
 └── agent             (one per iteration; gen_ai.operation.name=invoke_agent)
-    └── execute_tool  (one per tool call; gen_ai.operation.name=execute_tool)
+    └── execute_tool  (one per id-bearing tool call; gen_ai.operation.name=execute_tool)
 ```
 
 ### Root span
@@ -137,12 +137,20 @@ effective model via `runtime.GenAISystemFor`; `System()` is only the fallback.
 
 ### execute_tool spans
 
-One per tool call the runtime reports, a child of that iteration's agent
-span, named `execute_tool <tool name>`. `toolSpanTracker`
-(`internal/cli/tool_spans.go`) starts the span when the `ToolUseEvent`
-arrives and ends it when the matching `ToolResultEvent` arrives, so both
-timestamps are runner-side receipt instants on one clock — the start is
-arguments-complete, not execution start. Attributes:
+One per id-bearing tool call the runtime reports (Claude Code today), up to
+1,024 per iteration, a child of that iteration's agent span, named
+`execute_tool <tool name>`. `toolSpanTracker`
+(`internal/cli/tool_spans.go`) starts the span when it handles the
+`ToolUseEvent` and ends it when it handles the matching `ToolResultEvent`.
+`iterationEventHandler` runs the console renderer first, then the tracker,
+then the Level 3 collector, so both timestamps are runner-side receipt
+instants on one clock, each trailing the sandbox by the pipe latency and the
+parser's decode of the line: the start also trails receipt by the renderer's output for
+the call (the renderer prints nothing for a result), and neither waits on
+the collector's redaction pass over its own event (events are handled one
+at a time, so with several calls open an instant can still trail the
+collector's pass over an earlier event, such as another call's large
+result) — the start is arguments-complete, not execution start. Attributes:
 `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`,
 `gen_ai.tool.call.id`; a result flagged `is_error` sets
 `error.type=tool_error` and status Error. A result whose stream line
@@ -150,16 +158,17 @@ exceeded the parser's 1 MiB bound arrives as `ToolResultEvent{Oversized}`
 (the parser salvages the call id from the line's retained prefix) and ends
 its span at receipt marked `fullsend.tool.result_oversized`, status Unset
 and no `error.type`, since `is_error` was never decoded. A call still open
-when the iteration ends — the runtime was stopped, or an over-long result
-line showed no id in that prefix — is closed by `Finish()` as
-`error.type=unanswered`; a
+when the stream ends — the runtime was stopped, or an over-long result
+line showed no id in that prefix — is closed as `error.type=unanswered` by
+`Finish()`, which `runAgent` calls once `rt.Run` returns, before content
+assembly; a
 call superseded by a second `tool_use` with the same id is ended the same
 way at the reuse; a result with no matching call (its `tool_use` line was skipped) becomes a
 near-zero-duration span marked `fullsend.tool.unmatched=true`. Events without
-an id — pi and codex emit none — produce no span, and a `server_tool_use`
-block on an `assistant` line produces no event at all (its result never
-arrives as a `tool_result`), so the child count can be below
-`fullsend.tool_calls`. The name passes through `security.OutputPipeline()`
+an id — pi and codex emit none — produce no span, so the child count can be
+below `fullsend.tool_calls`, which counts every reported call, id or not; a
+`server_tool_use` block on an `assistant` line produces no event at all (its
+result never arrives as a `tool_result`), so it appears in neither count. The name passes through `security.OutputPipeline()`
 — Unicode normalization, then secret redaction, the same pipeline as span
 content — and is bounded to 256 bytes before it becomes the attribute; the
 span name keeps at most 128 bytes of it. The call id is scanned through the
@@ -169,8 +178,8 @@ id still keys the open-call map, so correlation is unaffected.
 The tracker records at most `maxToolSpansPerIteration` (1,024) spans per
 iteration and reports the overflow, which `runAgent` records as
 `fullsend.tool_spans.dropped` on the agent span — a burst of agent-controlled
-calls must not fill the OTLP batch queue and evict the agent span that ends
-right after `Finish()`. These spans are metadata: they carry no tool content
+calls must not fill the OTLP batch queue and evict the agent span, which
+ends after `Finish()` and content assembly. These spans are metadata: they carry no tool content
 and are emitted whether or not the Level 3 gate is on.
 
 ### Level 3 content on agent spans
@@ -185,16 +194,19 @@ spans — and tees the runtime's normalized event stream to it through
 **The tee trap:** supplying any `OnEvent` replaces the runtime's default
 console renderer (`internal/runtime/claude.go`), so the handler built by
 `iterationEventHandler` always calls the renderer first, then the
-collector, then the tool-span tracker. The handler is always set — tool
+tool-span tracker, then the collector — the tracker stamps span instants
+when it handles an event, so it must not wait on the collector's redaction
+pass over that event. The handler is always set — tool
 spans are emitted with the gate off — and with the gate off the collector
 is nil and inert, so console output stays byte-identical to the default
 renderer path.
 
 The collector (`internal/cli/content_collector.go`) coalesces contiguous
 text/reasoning deltas, maps tool use to `tool_call` parts and tool
-results to `tool_call_response` parts (correlated by `id` when the
-runtime's stream provides one; the schema's required result field is
-`response`), redacts every
+results to `tool_call_response` parts (only the Claude parser emits
+`ToolResultEvent` and call ids today — pi and codex emit neither,
+[#7414](https://github.com/fullsend-ai/fullsend/issues/7414); the schema's
+required result field is `response`), redacts every
 part through `security.OutputPipeline()` at assembly (redaction runs
 before the size budget — truncating first could split a secret past
 recognition), enforces a 256 KiB ordered-suffix budget (the ending survives — the

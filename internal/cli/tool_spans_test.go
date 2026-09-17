@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -176,6 +177,19 @@ func TestToolSpanTracker_OversizedOrphanResultCarriesBothMarkers(t *testing.T) {
 	assert.True(t, attrs["fullsend.tool.result_oversized"].AsBool())
 	assert.NotContains(t, attrs, attribute.Key("error.type"))
 	assert.Equal(t, codes.Unset, spans[0].Status.Code)
+}
+
+func TestToolSpanTracker_StartIsStampedBeforeTheNameScan(t *testing.T) {
+	// The name is sanitized at full length before it is bounded, and its
+	// length is the stream's to set; that scan must not sit ahead of the
+	// start stamp. A ratio, not an absolute time, so load cannot flake it.
+	tr, rec, _ := toolSpanFixture(t)
+	entry := time.Now()
+	tr.Handle(agentruntime.ToolUseEvent{ID: "toolu_big", Name: strings.Repeat("a", 512<<10)})
+	handled := time.Since(entry)
+	require.Len(t, rec.Started(), 2)
+	lag := rec.Started()[1].StartTime().Sub(entry)
+	assert.Less(t, lag, handled/10, "the span start must not trail the tracker's entry by the name scan")
 }
 
 func TestToolSpanTracker_EventsWithoutIDProduceNoSpan(t *testing.T) {
@@ -381,20 +395,53 @@ func TestToolSpanTracker_NilIsInert(t *testing.T) {
 	})
 }
 
-func TestIterationEventHandler_RendersThenCollectsThenTracks(t *testing.T) {
-	tr, rec, _ := toolSpanFixture(t)
+// spanHooks is a span processor that reports span starts and ends as they
+// happen, so a test can observe what else had run by then.
+type spanHooks struct{ onStart, onEnd func(name string) }
+
+func (h spanHooks) OnStart(_ context.Context, s sdktrace.ReadWriteSpan) { h.onStart(s.Name()) }
+func (h spanHooks) OnEnd(s sdktrace.ReadOnlySpan)                       { h.onEnd(s.Name()) }
+func (spanHooks) Shutdown(context.Context) error                        { return nil }
+func (spanHooks) ForceFlush(context.Context) error                      { return nil }
+
+func TestIterationEventHandler_RendersThenTracksThenCollects(t *testing.T) {
+	// The tracker stamps a span's start and end when it handles the event,
+	// so it runs before the collector — whose redaction pass scales with
+	// the result's size — and after the renderer, which always goes first.
 	c := newContentCollector(4096)
+	partsAtStart, partsAtEnd := -1, -1
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanHooks{
+		onStart: func(name string) {
+			if name != "agent" {
+				partsAtStart = len(c.parts)
+			}
+		},
+		onEnd: func(string) { partsAtEnd = len(c.parts) },
+	}))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	tracer := tp.Tracer("test")
+	agentCtx, _ := tracer.Start(context.Background(), "agent")
+	tr := newToolSpanTracker(tracer, agentCtx)
+
 	var rendered []agentruntime.AgentEvent
-	handler := iterationEventHandler(func(e agentruntime.AgentEvent) { rendered = append(rendered, e) }, c, tr)
+	var spansAtRender, openAtRender []int
+	handler := iterationEventHandler(func(e agentruntime.AgentEvent) {
+		rendered = append(rendered, e)
+		spansAtRender = append(spansAtRender, tr.created)
+		openAtRender = append(openAtRender, len(tr.open))
+	}, c, tr)
 	require.NotNil(t, handler)
 
 	handler(agentruntime.ToolUseEvent{ID: "toolu_09", Name: "Bash", Summary: "ls"})
 	handler(agentruntime.ToolResultEvent{ID: "toolu_09", Result: "ok"})
 
 	assert.Len(t, rendered, 2, "the console renderer sees every event")
-	res := c.Result("stop")
-	assert.Contains(t, res.OutputMessages, `"tool_call_response"`, "the collector still receives every event")
-	assert.Len(t, endedToolSpans(rec), 1, "the tracker receives every event")
+	assert.Equal(t, 0, spansAtRender[0], "the renderer runs before the tracker opens the call's span")
+	assert.Equal(t, 1, openAtRender[1], "and before the tracker ends it on the result")
+	assert.Equal(t, 0, partsAtStart, "the span starts before the collector takes the tool_use")
+	assert.Equal(t, 1, partsAtEnd, "the span ends before the collector takes the result")
+	assert.Contains(t, c.Result("stop").OutputMessages, `"tool_call_response"`, "the collector still receives every event")
+	assert.Empty(t, tr.open, "the tracker receives every event")
 }
 
 func TestIterationEventHandler_NilCollectorAndTrackerStillRender(t *testing.T) {

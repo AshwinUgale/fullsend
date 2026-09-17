@@ -12,10 +12,12 @@ For implementation details, see the
 |-------|-----------------|----------------------|
 | 1 | `run-telemetry.jsonl` file in the run output directory | None |
 | 2 | OTLP/HTTP export to a remote backend (metadata only) | `OTEL_EXPORTER_OTLP_*ENDPOINT` |
-| 3 | Conversation content (assistant text, reasoning, tool calls and results) on `agent` spans | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` |
+| 3 | Conversation content (assistant text, reasoning, tool calls, and — on Claude runs — tool results) on `agent` spans | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` |
 
 All levels produce metadata (timing, token counts, tool names, errors),
-including one `execute_tool` span per tool call under each `agent` span.
+including up to one `execute_tool` span per id-bearing tool call under each
+`agent` span (Claude Code today; pi and codex emit no call ids, [#7414](https://github.com/fullsend-ai/fullsend/issues/7414)),
+capped at 1,024 per iteration.
 Level 3 adds the agent's conversation content to spans — enabled by one
 environment variable, exactly like Level 2's endpoint.
 
@@ -90,9 +92,10 @@ summary), and tool results — including any sub-agent activity,
 unattributed — as the `gen_ai.output.messages` span attribute: a JSON
 string following the
 [GenAI output-messages schema](https://github.com/open-telemetry/semantic-conventions/blob/v1.37.0/docs/gen-ai/gen-ai-output-messages.json)
-with a `finish_reason` of `stop` or `error`. Tool calls and their
-results share a correlating `id` when the runtime's stream provides one
-(Claude runs do).
+with a `finish_reason` of `stop` or `error`. Tool results, and the `id` that correlates each with its call, are captured
+only when the runtime's stream provides them: Claude runs do; the pi and
+codex parsers emit neither yet
+([#7414](https://github.com/fullsend-ai/fullsend/issues/7414)).
 
 **Not captured:** model input (`gen_ai.input.messages`) and
 pre/post-script content. First-iteration runs have no meaningful
@@ -156,13 +159,21 @@ of the same trace with identical span IDs.
 run (root; Consumer when dispatched with TRACEPARENT, else Internal)
 ├── sandbox_create (gen_ai.operation.name=create_agent)
 └── agent           (one per iteration; gen_ai.operation.name=invoke_agent)
-    └── execute_tool (one per tool call; gen_ai.operation.name=execute_tool)
+    └── execute_tool (one per id-bearing tool call; gen_ai.operation.name=execute_tool)
 ```
 
 `execute_tool` spans are named `execute_tool <tool name>`. One starts when
 the runtime reports a tool call (its arguments complete) and ends when it
-reports the result — both are runner-side receipt times, so the span
-brackets execution rather than measuring it exactly. A call with no result
+reports the result — both are runner-side receipt times, which trail the
+sandbox by the pipe latency and the parser's decode of the line, stamped after the
+console renderer's output for the call (it prints nothing for a result) and
+before that event's Level 3 content processing. Events are handled one at a
+time, so with several calls open a time can still trail the processing of
+an earlier event, such as another call's large result. The span approximates
+execution rather than measuring it: both times trail the sandbox, and when
+the start trails by more than the end (an earlier event was still being
+processed when the call arrived) the span is shorter than the execution it
+covers. A call with no result
 by the end of the iteration is closed with `error.type=unanswered`; a
 result whose stream line exceeded the parser's 1 MiB bound ends its span on
 receipt, marked `fullsend.tool.result_oversized` with no status and no
@@ -244,7 +255,7 @@ The `agent` span's provider identity reflects only the parent run's serving endp
 | `fullsend.content.redactions` | `agent` | Level 3 only: number of security findings raised while redacting content at assembly (including findings from parts the size budget later dropped) |
 | `fullsend.tool.unmatched` | `execute_tool` | Present (`true`) when a result arrived for a call the stream never reported; the span has near-zero duration |
 | `fullsend.tool.result_oversized` | `execute_tool` | Present (`true`) when the result's stream line exceeded the parser's 1 MiB bound: the call was answered but nothing of the result was decoded, so the span has no status and no `error.type` |
-| `fullsend.tool_spans.dropped` | `agent` | Present when the iteration reported more than 1,024 tool calls: the number of `tool_use` events with a usable id that arrived past the cap, each counted once whatever its result later does; a result with no open span past the cap is not counted |
+| `fullsend.tool_spans.dropped` | `agent` | Present when the iteration hit the 1,024-span cap and at least one id-bearing call was refused a span: the number of `tool_use` events with a usable id that arrived past the cap, each counted once whatever its result later does; a result with no open span past the cap is not counted |
 
 ### Common attributes
 
@@ -357,7 +368,8 @@ Non-finite float values (NaN, Infinity) are encoded as proto3 JSON strings
 The file is written synchronously per span. Spans are flushed to disk as
 they complete; the file is the forensic record for crashed runs. Every
 `execute_tool` span is one such line, so a tool-heavy iteration (a hundred
-or more calls) adds that many.
+or more id-bearing calls — Claude Code today) adds up to that many, capped
+at 1,024.
 
 ## Cross-run trace correlation
 

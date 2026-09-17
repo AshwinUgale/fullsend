@@ -45,7 +45,7 @@ parsers pass no call ids through.
 1. **Message record only** (status quo): tool calls stay parts of
    `gen_ai.output.messages`; no per-call timing or status in the span tree.
 2. **`execute_tool` child spans from the normalized events**: one span per
-   call under the iteration's `agent` span, metadata only; content stays on
+   id-bearing call under the iteration's `agent` span, metadata only; content stays on
    the message record.
 3. **The runtime's native OpenTelemetry**: Claude Code emits
    `claude_code.tool` spans (beta) and honours inbound `TRACEPARENT` — true
@@ -61,8 +61,18 @@ Option 2. `toolSpanTracker` (`internal/cli/tool_spans.go`) opens an
 call and ends it when the result arrives. Both timestamps are runner-side
 receipt instants: the parent `agent` span's clock, so a child never falls
 outside its parent through cross-host skew, and the one source every runtime
-provides. The cost is looser bracketing — receipt trails the sandbox's own
-timestamps by the pipe latency — and the start is arguments-complete.
+provides. The cost is timing that is loose in both directions — receipt trails the sandbox's own
+timestamps by the pipe latency and the parser's decode of the line, and the
+start also by the console renderer's output for the call, which the runner
+prints before the tracker stamps the span (it prints nothing for a result).
+The Level 3 collector runs after the tracker, so its redaction pass over an
+event never delays that event's own stamp; events are handled one at a time,
+though, so with several calls open a stamp can still trail the collector's
+pass over an event queued ahead of it (another call's large result) — a
+start delayed that way makes the span shorter than the execution, and it can
+begin after a quick call has already finished. A call
+still open when the stream ends is closed then, before content assembly. The
+start is arguments-complete.
 Decoding Claude Code's timestamps into `trace.WithTimestamp` would tighten
 that runtime alone and is left open; upstream documents the assistant-line
 field as optional, host-clock and display-only, and the user-line field as
@@ -74,8 +84,9 @@ time. Attributes follow semconv v1.37.0:
 close as `error.type=unanswered`, a result whose stream line was too long
 to decode ends its span marked `fullsend.tool.result_oversized` with no
 status (the tool answered; its outcome is unknown), results for calls never
-reported are marked `fullsend.tool.unmatched`, and events without a call id (pi, codex,
-server-side tools) get no span — the edge cases are specified in the [dev
+reported are marked `fullsend.tool.unmatched`, events without a call id (pi,
+codex) get no span, and neither do Claude Code's server-side tools, whose
+result never arrives as a `tool_result` — the edge cases are specified in the [dev
 guide](../guides/dev/tracing.md#execute_tool-spans). Names and call ids pass
 through the same sanitizer as span content — names bounded, ids dropped on
 any finding; at most 1,024 spans are recorded per iteration, so an agent-
