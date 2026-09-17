@@ -173,7 +173,8 @@ spans only; the root span keeps `fullsend.cost_usd` and `fullsend.tool_calls`
 double-counting token usage across the trace.
 
 **2026-09-03 — Tool-call span topology ([ADR 0108](0108-tool-call-span-topology.md)):**
-each tool call the runtime reports becomes an `execute_tool` child of its
-iteration's `agent` span, metadata only; the message record on the `agent`
-span stays the content carrier. Sub-agent nesting (deferred item 1 above)
+each id-bearing tool call the runtime reports — Claude Code today; pi and
+codex emit no call ids — becomes an `execute_tool` child of its iteration's
+`agent` span, up to 1,024 per iteration, metadata only; the message record
+on the `agent` span stays the content carrier. Sub-agent nesting (deferred item 1 above)
 remains deferred.
