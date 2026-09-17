@@ -195,15 +195,21 @@ func TestGitHubSetupCmd_PerRepoDryRun_Vendor(t *testing.T) {
 }
 
 func TestGitHubSetupCmd_PerRepoRequiresInferenceProject(t *testing.T) {
-	t.Setenv("GH_TOKEN", "test-token")
-	cmd := newRootCmd()
-	cmd.SetArgs([]string{"github", "setup", "acme/widget",
-		"--mint-url", "https://mint-test-abc123.run.app"})
-	err := cmd.Execute()
+	// No existing .fullsend/config.yaml (first install, modeled via an
+	// empty FakeClient — loadExistingPerRepoConfig sees a 404 and
+	// returns a nil top layer) and no FULLSEND_GCP_PROJECT_ID secret:
+	// --inference-project has no source to resolve from, so setup must
+	// fail the required-value check in resolveInferenceReuse.
+	client := forge.NewFakeClient()
+	printer := ui.New(&discardWriter{})
+
+	err := runGitHubSetupPerRepo(context.Background(), client, printer, githubSetupConfig{
+		target:       "acme/widget",
+		mintURL:      "https://mint-test-abc123.run.app",
+		agents:       strings.Join(config.PerRepoDefaultRoles(), ","),
+		changedFlags: map[string]bool{"mint-url": true},
+	})
 	require.Error(t, err)
-	// With a fake token the RepoSecretExists call fails, surfacing an API
-	// error. Either the API-error path or the not-found path is acceptable
-	// here — both mention the secret name or the flag.
 	errMsg := err.Error()
 	assert.True(t, strings.Contains(errMsg, "--inference-project") ||
 		strings.Contains(errMsg, "FULLSEND_GCP_PROJECT_ID"),
@@ -211,17 +217,65 @@ func TestGitHubSetupCmd_PerRepoRequiresInferenceProject(t *testing.T) {
 }
 
 func TestGitHubSetupCmd_PerRepoRequiresWIFProvider(t *testing.T) {
-	t.Setenv("GH_TOKEN", "test-token")
-	cmd := newRootCmd()
-	cmd.SetArgs([]string{"github", "setup", "acme/widget",
-		"--mint-url", "https://mint-test-abc123.run.app",
-		"--inference-project", "my-project"})
-	err := cmd.Execute()
+	// --inference-project is supplied explicitly, but neither the (first
+	// install, no top layer) config nor a repo secret supplies the WIF
+	// provider, so setup must fail the required-value check for it.
+	client := forge.NewFakeClient()
+	printer := ui.New(&discardWriter{})
+
+	err := runGitHubSetupPerRepo(context.Background(), client, printer, githubSetupConfig{
+		target:           "acme/widget",
+		mintURL:          "https://mint-test-abc123.run.app",
+		inferenceProject: "my-project",
+		agents:           strings.Join(config.PerRepoDefaultRoles(), ","),
+		changedFlags:     map[string]bool{"mint-url": true, "inference-project": true},
+	})
 	require.Error(t, err)
 	errMsg := err.Error()
 	assert.True(t, strings.Contains(errMsg, "--inference-wif-provider") ||
 		strings.Contains(errMsg, "FULLSEND_GCP_WIF_PROVIDER"),
 		"expected error to mention --inference-wif-provider or FULLSEND_GCP_WIF_PROVIDER, got: %s", errMsg)
+}
+
+func TestGitHubSetupCmd_PerRepoInferenceValuesFromExistingConfig(t *testing.T) {
+	// A re-run must resolve required inference values from the existing
+	// .fullsend/config.yaml top layer — loaded remotely via
+	// loadExistingPerRepoConfig — without requiring
+	// --inference-project/--inference-wif-provider or a pre-existing
+	// repo secret. This models the "supplied by that layer" path that
+	// the required-value tests above don't exercise on their own.
+	client := forge.NewFakeClient()
+	client.AuthenticatedUser = "acme"
+	client.Repos = []forge.Repository{{FullName: "acme/widget", DefaultBranch: "main"}}
+	client.TokenScopes = []string{"repo", "workflow"}
+	client.FileContents = map[string][]byte{
+		"acme/widget/.fullsend/config.yaml": []byte(`version: "1"
+mint_url: https://mint-test-abc123.run.app
+inference:
+  provider: vertex
+  project: existing-project
+  region: us-central1
+  wif_provider: projects/123456789/locations/global/workloadIdentityPools/fullsend-pool/providers/github-oidc
+`),
+	}
+	printer := ui.New(&discardWriter{})
+
+	err := runGitHubSetupPerRepo(context.Background(), client, printer, githubSetupConfig{
+		target:       "acme/widget",
+		agents:       strings.Join(config.PerRepoDefaultRoles(), ","),
+		changedFlags: map[string]bool{}, // no CLI flags: values must come from the existing config
+	})
+	require.NoError(t, err)
+
+	// Both required values were resolved from the existing config layer
+	// — not reused from a pre-existing secret (none exists) and not
+	// supplied via CLI flags (none were passed).
+	secrets := make(map[string]string)
+	for _, s := range client.CreatedSecrets {
+		secrets[s.Name] = s.Value
+	}
+	assert.Equal(t, "existing-project", secrets["FULLSEND_GCP_PROJECT_ID"])
+	assert.Equal(t, "projects/123456789/locations/global/workloadIdentityPools/fullsend-pool/providers/github-oidc", secrets["FULLSEND_GCP_WIF_PROVIDER"])
 }
 
 func TestGitHubSetupCmd_FullsendRefConflictsWithVendor(t *testing.T) {
