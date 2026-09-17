@@ -81,17 +81,21 @@ type ConvergeResult struct {
 	// received a full install.
 	Installed bool
 
-	// NeedsGitLabPostInstall is true when Installed is true and no
-	// fullsend-managed component (variables, secrets, etc.) existed on
-	// the repo before this run. GitLab post-install (bot token +
-	// pipeline schedule setup) is destructive — it revokes and
-	// recreates the live fullsend-bot project access token and deletes
-	// and recreates pipeline schedules — so it must run only on a
-	// genuinely first-time install. Re-running install while the
-	// initialization MR is still open (#7417) keeps Installed true
-	// (workflow file still absent) but must not re-trigger this
-	// destructive setup when secrets/variables already exist from the
-	// prior run.
+	// NeedsGitLabPostInstall is true when Installed is true and the
+	// GitLab post-install artifacts (the fullsend-bot PAT secret and
+	// pipeline schedules) did not already exist on the repo before this
+	// run. GitLab post-install (bot token + pipeline schedule setup) is
+	// destructive — it revokes and recreates the live fullsend-bot
+	// project access token and deletes and recreates pipeline
+	// schedules — so it must run only when those artifacts are
+	// genuinely missing. Re-running install while the initialization MR
+	// is still open (#7417) keeps Installed true (workflow file still
+	// absent) but must not re-trigger this destructive setup once the
+	// bot token and schedules already exist from a prior run. This is
+	// deliberately narrower than "any fullsend-managed component
+	// exists" — the GCP inference secrets every Install() writes are
+	// unrelated to GitLab post-install and must not mask it having
+	// failed or never run.
 	NeedsGitLabPostInstall bool
 
 	// Converged is true when the repo had drifted components that were
@@ -216,6 +220,26 @@ func anyComponentPresent(components []ComponentStatus) bool {
 		}
 	}
 	return false
+}
+
+// gitlabPostInstallDone returns true when the GitLab-specific
+// post-install artifacts — the fullsend-bot PAT secret and every
+// pipeline schedule — are already present. Unlike anyComponentPresent,
+// this ignores unrelated components (e.g. the GCP inference secrets
+// that every Install() writes regardless of forge), so a repo whose
+// Install() succeeded but whose GitLab post-install step failed or
+// never ran is not mistaken for one that already has a bot token and
+// schedules.
+func gitlabPostInstallDone(components []ComponentStatus) bool {
+	if !hasComponent(components, "secret:"+forge.SecretForgeToken) {
+		return false
+	}
+	for _, spec := range PipelineScheduleSpecs() {
+		if !hasComponent(components, spec.ComponentName) {
+			return false
+		}
+	}
+	return true
 }
 
 // workflowPresent returns true when the forge-specific shim workflow file
@@ -535,14 +559,19 @@ func convergeRepo(ctx context.Context,
 	// upgrade path selects a version-specific bump branch and leaves
 	// the original MR incomplete (#7417).
 	isNew := !workflowPresent(d.components)
-	// Snapshot "nothing existed before this run" ahead of Install(),
-	// which is about to write variables/secrets — anyComponentPresent
-	// on d.components (probed during discovery, before any writes)
-	// reflects the pre-run state. Destructive GitLab post-install setup
-	// (bot token + pipeline schedule recreation) must gate on this, not
-	// on isNew/Installed alone, so it does not re-run on every
-	// re-install while the initialization MR is still open (#7417).
-	needsPostInstall := !anyComponentPresent(d.components)
+	// Snapshot "GitLab post-install has not already succeeded" ahead of
+	// Install(), which is about to write variables/secrets —
+	// gitlabPostInstallDone on d.components (probed during discovery,
+	// before any writes) reflects the pre-run state. Destructive GitLab
+	// post-install setup (bot token + pipeline schedule recreation) must
+	// gate on this, not on isNew/Installed alone, so it does not re-run
+	// on every re-install while the initialization MR is still open
+	// (#7417). It must also gate on the GitLab-specific artifacts
+	// (bot token secret, schedules) rather than any component being
+	// present — the GCP inference secrets Install() always writes are
+	// unrelated to GitLab post-install, so their presence alone must not
+	// mask a post-install step that failed or never ran.
+	needsPostInstall := !gitlabPostInstallDone(d.components)
 
 	// Case 1: Workflow not on the default branch — full install via
 	// Install(), which always uses fresh-install PR metadata.

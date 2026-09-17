@@ -3802,9 +3802,19 @@ func TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath(t *testing.T
 	}
 	assertGitLabScaffoldComplete(t, firstFiles)
 
-	// Second run with the same default-branch state: secrets exist from
-	// the first Install (written before the MR merge) but the workflow
-	// file is still absent from the default branch.
+	// Simulate the CLI's GitLab post-install step (bot token + pipeline
+	// schedule setup) succeeding after the first run, since that setup
+	// lives outside Converge and NeedsGitLabPostInstall=true is what
+	// triggers it. Converge alone never writes these artifacts.
+	fc.Secrets["acme/api/"+forge.SecretForgeToken] = true
+	fc.PipelineSchedules["acme/api"] = []forge.PipelineSchedule{
+		{Description: "fullsend slash poll"},
+		{Description: "fullsend event poll"},
+	}
+
+	// Second run with the same default-branch state: secrets and the
+	// GitLab post-install artifacts exist from the first run, but the
+	// workflow file is still absent from the default branch.
 	sc2 := &spyScaffoldCommit{}
 	result2, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc2.fn(), noopProgress)
 	if err != nil {
@@ -3872,4 +3882,36 @@ func TestConverge_PartialSecretsWithoutWorkflowStayOnFreshInstallPath(t *testing
 		t.Error("passed installed=true despite missing workflow; would open a bump MR")
 	}
 	assertGitLabScaffoldComplete(t, files)
+}
+
+// TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets covers a
+// review finding on #7418: NeedsGitLabPostInstall must be gated on the
+// GitLab-specific post-install artifacts (the bot token secret and
+// pipeline schedules), not on any probed component being present. A
+// retry after Install() succeeded but the GitLab post-install step
+// failed (or never ran) must still report NeedsGitLabPostInstall=true so
+// the retry actually repairs the missing bot token/schedules, instead of
+// silently skipping them just because unrelated GCP inference secrets
+// already exist.
+func TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	fc.Secrets["acme/api/"+forge.SecretGCPProjectID] = true
+	fc.Secrets["acme/api/"+forge.SecretGCPWIFProvider] = true
+
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("expected 1 installed, got %d", len(result.Installed()))
+	}
+	if !result.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("expected NeedsGitLabPostInstall=true: pre-existing GCP inference secrets must not mask a missing GitLab bot token/schedules")
+	}
 }

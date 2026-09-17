@@ -2154,6 +2154,20 @@ gitlab:
 		delete(fc.FileContents, path)
 	}
 
+	// The first run's post-install step type-asserts fc.Client to
+	// *gl.LiveClient to perform the actual bot-token/schedule setup;
+	// FakeClient fails that assertion, so it never writes the resulting
+	// secret/schedules here. Seed them directly to simulate a real
+	// GitLab client completing post-install successfully on the first
+	// run, so the second run's NeedsGitLabPostInstall gate (which keys
+	// on those specific artifacts, not just "any component exists") is
+	// exercised against a realistic prior state.
+	fc.Secrets["group/project/"+forge.SecretForgeToken] = true
+	fc.PipelineSchedules["group/project"] = []forge.PipelineSchedule{
+		{Description: "fullsend slash poll"},
+		{Description: "fullsend event poll"},
+	}
+
 	secondOutput := captureStdout(t, func() {
 		_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
 	})
