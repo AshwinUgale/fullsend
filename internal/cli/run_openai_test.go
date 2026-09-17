@@ -799,6 +799,55 @@ func TestRunOpenAIRefresh_GivesUpAfterRetries(t *testing.T) {
 	assert.Contains(t, buf.String(), "gave up")
 }
 
+func TestStartOpenAIRefreshers_NoHandles(t *testing.T) {
+	stops := startOpenAIRefreshers(nil, ui.New(io.Discard))
+	assert.Empty(t, stops, "no handles means no stop funcs")
+}
+
+func TestStartOpenAIRefreshers_LaunchesOnePerHandleAndStopsIndependently(t *testing.T) {
+	shrinkOpenAIRefreshSchedule(t)
+	fakeOpenshellRecorder(t)
+	var buf syncBuffer
+	printer := ui.New(&buf)
+	handles := []openAIProviderHandle{
+		{name: "openai-abc", keys: []string{"OPENAI_API_KEY"}, source: "static", expiresAt: time.Now()},
+		{name: "openai-def", keys: []string{"OPENAI_API_KEY"}, source: "static", expiresAt: time.Now()},
+	}
+
+	stops := startOpenAIRefreshers(handles, printer)
+	require.Len(t, stops, len(handles), "one stop func per handle, same order")
+
+	require.Eventually(t, func() bool {
+		s := buf.String()
+		return strings.Contains(s, "refreshed for openai-abc") && strings.Contains(s, "refreshed for openai-def")
+	}, 5*time.Second, 20*time.Millisecond, "each handle got its own refresh goroutine")
+
+	// Stopping one handle's refresher must return promptly (the stop func
+	// waits on that handle's own WaitGroup) without needing the other
+	// handle's refresher to also be stopped.
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stops[0]()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop func for handle 0 did not return")
+	}
+
+	stopped = make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stops[1]()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop func for handle 1 did not return")
+	}
+}
+
 // shrinkOpenAIRefreshSchedule makes the refresh loop fire within
 // milliseconds for tests and restores the production values afterwards.
 func shrinkOpenAIRefreshSchedule(t *testing.T) {
