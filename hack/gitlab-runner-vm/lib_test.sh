@@ -142,6 +142,35 @@ assert_succeeds_with \
   "with --no-service-account --no-scopes" \
   with_clean_env bash "${CREATE_GCP}" --help
 
+assert_succeeds_with \
+  "gcp: --help names delete-gcp-vm.sh as the recreation path" \
+  "./delete-gcp-vm.sh" \
+  with_clean_env bash "${CREATE_GCP}" --help
+
+assert_succeeds_with \
+  "gcp: --help frames recreation as two-command (no --recreate)" \
+  "two-command compliance" \
+  with_clean_env bash "${CREATE_GCP}" --help
+
+if grep -Fq 'delete it first' "${CREATE_GCP}"; then
+  fail "create-gcp-vm.sh: existing-VM error still says 'delete it first'"
+else
+  pass "create-gcp-vm.sh: existing-VM error no longer says 'delete it first'"
+fi
+
+if grep -Fq './delete-gcp-vm.sh ${vm_name} (which drains in-flight jobs)' "${CREATE_GCP}" \
+  && grep -Fq 'then re-run create. Or choose a different number.' "${CREATE_GCP}"; then
+  pass "create-gcp-vm.sh: existing-VM error points at drain-safe delete-gcp-vm.sh"
+else
+  fail "create-gcp-vm.sh: existing-VM error missing drain-safe delete-gcp-vm.sh pointer"
+fi
+
+if grep -Fq 'see issue #7257' "${CREATE_GCP}"; then
+  fail "create-gcp-vm.sh: header still points at closed issue #7257"
+else
+  pass "create-gcp-vm.sh: header no longer points at issue #7257"
+fi
+
 echo "== create-openshift-vm.sh validation =="
 assert_fails_with \
   "ocp: neither token" \
@@ -177,6 +206,35 @@ assert_succeeds_with \
   "ocp: --help documents runner-hub example" \
   "Join an existing runner pool" \
   with_clean_env bash "${CREATE_OCP}" --help
+
+assert_succeeds_with \
+  "ocp: --help names delete-openshift-vm.sh as the recreation path" \
+  "./delete-openshift-vm.sh" \
+  with_clean_env bash "${CREATE_OCP}" --help
+
+assert_succeeds_with \
+  "ocp: --help frames recreation as two-command (no --recreate)" \
+  "two-command compliance" \
+  with_clean_env bash "${CREATE_OCP}" --help
+
+if grep -Fq 'delete it first' "${CREATE_OCP}"; then
+  fail "create-openshift-vm.sh: existing-VM error still says 'delete it first'"
+else
+  pass "create-openshift-vm.sh: existing-VM error no longer says 'delete it first'"
+fi
+
+if grep -Fq './delete-openshift-vm.sh ${vm_name} (which drains in-flight jobs)' "${CREATE_OCP}" \
+  && grep -Fq 'then re-run create. Or choose a different number.' "${CREATE_OCP}"; then
+  pass "create-openshift-vm.sh: existing-VM error points at drain-safe delete-openshift-vm.sh"
+else
+  fail "create-openshift-vm.sh: existing-VM error missing drain-safe delete-openshift-vm.sh pointer"
+fi
+
+if grep -Fq 'see issue #7257' "${CREATE_OCP}"; then
+  fail "create-openshift-vm.sh: header still points at closed issue #7257"
+else
+  pass "create-openshift-vm.sh: header no longer points at issue #7257"
+fi
 
 echo "== delete script validation =="
 # Neither RUNNER_TOKEN nor GL_TOKEN must fail closed — omitting GL_TOKEN is
