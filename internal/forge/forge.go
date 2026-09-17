@@ -20,6 +20,14 @@ const ConfigRepoName = ".fullsend"
 // per-org enrollment from overriding a per-repo installation.
 const PerRepoGuardVar = "FULLSEND_PER_REPO_INSTALL"
 
+// ChangesRequestedMarker is the hidden HTML comment the GitLab review
+// bot embeds in REQUEST_CHANGES MR notes. The poller retains bot-authored
+// notes that contain this marker, and the dispatch router routes them to
+// the fix stage. GitHub uses the native pull_request_review event instead.
+// Keep this value in one place so the poster, poller, and router cannot
+// silently diverge.
+const ChangesRequestedMarker = "<!-- fullsend:changes-requested -->"
+
 // Repo management variable and secret names.
 //
 // These constants cover every FULLSEND_* name used by repos install,

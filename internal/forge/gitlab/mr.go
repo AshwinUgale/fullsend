@@ -12,7 +12,10 @@ import (
 	"github.com/fullsend-ai/fullsend/internal/forge"
 )
 
-const requestChangesMarker = "<!-- fullsend:request-changes -->"
+// requestChangesMarker is the hidden HTML comment posted on GitLab
+// REQUEST_CHANGES notes. It must match the poller/router marker so a
+// review-bot request-changes note can dispatch the fix agent.
+const requestChangesMarker = forge.ChangesRequestedMarker
 
 // CreateChangeProposal creates a merge request on GitLab.
 func (c *LiveClient) CreateChangeProposal(ctx context.Context, owner, repo, title, body, head, base string) (*forge.ChangeProposal, error) {

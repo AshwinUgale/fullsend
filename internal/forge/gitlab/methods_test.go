@@ -644,6 +644,9 @@ func TestCreatePullRequestReview_Comment(t *testing.T) {
 	assert.Equal(t, "Review body", notes[0])
 	assert.Contains(t, notes[1], "`main.go:10`")
 	assert.Contains(t, notes[1], "Fix this")
+	for _, note := range notes {
+		assert.NotContains(t, note, requestChangesMarker)
+	}
 }
 
 func TestCreatePullRequestReview_CommentWithFileLevel(t *testing.T) {
@@ -2624,6 +2627,11 @@ func TestDismissPullRequestReview_WithoutMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRequestChangesMarkerMatchesSharedConstant(t *testing.T) {
+	assert.Equal(t, forge.ChangesRequestedMarker, requestChangesMarker)
+	assert.Equal(t, "<!-- fullsend:changes-requested -->", requestChangesMarker)
+}
+
 func TestCreatePullRequestReview_RequestChanges(t *testing.T) {
 	client, mux := setupTest(t)
 	ctx := context.Background()
@@ -2641,6 +2649,7 @@ func TestCreatePullRequestReview_RequestChanges(t *testing.T) {
 	require.Len(t, notes, 1)
 	assert.Contains(t, notes[0], "Please fix")
 	assert.Contains(t, notes[0], requestChangesMarker)
+	assert.Equal(t, forge.ChangesRequestedMarker, requestChangesMarker)
 }
 
 func TestCreatePullRequestReview_RequestChangesEmptyBody(t *testing.T) {

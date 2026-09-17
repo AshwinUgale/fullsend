@@ -54,7 +54,13 @@ These labels are applied by the review post-script based on the review outcome.
 | `rejected` | The review agent rejected the PR and the post-script closed it. |
 
 When the review agent requests changes (without rejecting), no outcome label is
-applied — the `pull_request_review` event triggers the [fix agent](fix.md) directly.
+applied. On GitHub, the native `pull_request_review` event triggers the
+[fix agent](fix.md) directly. On GitLab, which has no equivalent native review
+event, the review bot posts an MR note with the hidden
+`<!-- fullsend:changes-requested -->` marker; the scheduled poller retains that
+bot-authored note and the dispatch router routes it to fix. Fork merge requests
+are blocked from automatic fix runs, matching GitHub. Comment-only reviews do
+not carry the marker and do not dispatch fix.
 
 Stale outcome labels from prior review runs are removed before the new one is
 applied.

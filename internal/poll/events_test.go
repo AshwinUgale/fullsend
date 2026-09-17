@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/fullsend-ai/fullsend/internal/forge"
 )
 
 // newEventsPoller creates a Poller with test defaults suitable for events
@@ -944,7 +946,7 @@ func TestFilterBotEvents_RetainsBotChangesRequested(t *testing.T) {
 		{
 			Type:         "mr_note",
 			IID:          5,
-			NoteBody:     "Changes needed <!-- fullsend:changes-requested --> here",
+			NoteBody:     "Changes needed " + forge.ChangesRequestedMarker + " here",
 			IsBot:        true,
 			NoteAuthorID: 100, // matches botUserID
 		},
@@ -952,6 +954,46 @@ func TestFilterBotEvents_RetainsBotChangesRequested(t *testing.T) {
 	filtered := p.filterBotEvents(events)
 	if len(filtered) != 1 {
 		t.Fatalf("expected bot changes-requested marker to be retained, got %d events", len(filtered))
+	}
+}
+
+func TestFilterBotEvents_DropsBotNoteWithoutChangesRequestedMarker(t *testing.T) {
+	mc := newMockClient()
+	p := newEventsPoller(mc) // botUserID = 100
+
+	events := []RoutableEvent{
+		{
+			Type:         "mr_note",
+			IID:          5,
+			NoteBody:     "Please consider this suggestion <!-- fullsend:review-agent -->",
+			IsBot:        true,
+			NoteAuthorID: 100,
+		},
+	}
+	filtered := p.filterBotEvents(events)
+	if len(filtered) != 0 {
+		t.Fatalf("expected comment-only bot note without changes-requested marker to be dropped, got %d events", len(filtered))
+	}
+}
+
+func TestFilterBotEvents_DropsStaleRequestChangesMarker(t *testing.T) {
+	// GitLab previously posted <!-- fullsend:request-changes -->. That
+	// value must not be treated as the poller's trusted marker.
+	mc := newMockClient()
+	p := newEventsPoller(mc)
+
+	events := []RoutableEvent{
+		{
+			Type:         "mr_note",
+			IID:          5,
+			NoteBody:     "<!-- fullsend:request-changes -->\n\nPlease fix",
+			IsBot:        true,
+			NoteAuthorID: 100,
+		},
+	}
+	filtered := p.filterBotEvents(events)
+	if len(filtered) != 0 {
+		t.Fatalf("expected stale request-changes marker to be dropped, got %d events", len(filtered))
 	}
 }
 
