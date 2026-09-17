@@ -457,9 +457,11 @@ func newReposInstallCmd() *cobra.Command {
 		Long: `Idempotent convergence operator for repos.yaml manifest entries.
 
 For repos not yet in the manifest, adds them (requires --forge). For repos
-not yet provisioned, scaffolds workflow files and writes variables/secrets.
-For already-installed repos, reconciles variable drift and upgrades scaffold
-refs to match the manifest.
+whose shim workflow is not yet on the default branch, scaffolds workflow
+files and writes variables/secrets onto the initialization branch, including
+re-runs while an initialization PR/MR is still open. For repos whose workflow
+is already on the default branch, reconciles variable drift and upgrades
+scaffold refs to match the manifest.
 
 When repos are specified as positional arguments, only those repos are
 processed. Glob patterns (e.g. "acme/*") are matched against manifest
@@ -909,13 +911,24 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	}
 
 	// GitLab post-install: set up bot token and pipeline schedules for
-	// newly installed GitLab repos. Only fresh installs need this —
-	// converged repos already have working bot tokens and schedules.
-	// Running on converged repos would revoke live bot PATs, breaking
-	// in-flight pipelines.
+	// genuinely new GitLab repos. Entry into the loop body is gated on
+	// NeedsGitLabPostInstall (true when either artifact is missing), but
+	// the two destructive actions inside are each gated on their own
+	// specific flag (NeedsGitLabBotToken / NeedsGitLabPipelineSchedules)
+	// rather than the combined flag — a repo re-run while its
+	// initialization MR is still open (#7417) keeps Installed true (the
+	// shim workflow is still absent from the default branch) even though
+	// some GitLab post-install artifacts already exist from a prior run.
+	// Running bot-token setup when only the token exists (or schedule
+	// setup when only the schedules exist) would still revoke/recreate
+	// the live fullsend-bot PAT or delete/recreate pipeline schedules
+	// that didn't need it, breaking in-flight pipelines.
 	var installedPostFail int
 	if !opts.dryRun && len(installed) > 0 {
 		for _, r := range installed {
+			if !r.NeedsGitLabPostInstall {
+				continue
+			}
 			rc, ok := manifest.ResolveConfigWithGlobs(r.Owner, r.Repo)
 			if !ok || rc.Forge != repos.ForgeGitLab {
 				continue
@@ -932,27 +945,31 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 			}
 			glClient, ok := fc.Client.(*gl.LiveClient)
 			if !ok {
-				printer.StepWarn(fmt.Sprintf("[%s] GitLab client type assertion failed — bot token setup skipped", repoFullName))
+				printer.StepWarn(fmt.Sprintf("[%s] GitLab client type assertion failed — post-install setup skipped", repoFullName))
 				installedPostFail++
 				continue
 			}
 
-			_, botErr := setupGitLabBotToken(ctx, fc.Client, glClient, printer, r.Owner, r.Repo, opts.gitlabBotToken)
-			if botErr != nil {
-				printer.StepWarn(fmt.Sprintf("[%s] Bot token setup failed: %v", repoFullName, botErr))
-				installedPostFail++
-				continue
+			if r.NeedsGitLabBotToken {
+				_, botErr := setupGitLabBotToken(ctx, fc.Client, glClient, printer, r.Owner, r.Repo, opts.gitlabBotToken)
+				if botErr != nil {
+					printer.StepWarn(fmt.Sprintf("[%s] Bot token setup failed: %v", repoFullName, botErr))
+					installedPostFail++
+					continue
+				}
 			}
 
-			targetRepo, repoErr := fc.Client.GetRepo(ctx, r.Owner, r.Repo)
-			if repoErr != nil {
-				printer.StepWarn(fmt.Sprintf("[%s] Could not get repo info for schedule setup: %v", repoFullName, repoErr))
-				continue
-			}
+			if r.NeedsGitLabPipelineSchedules {
+				targetRepo, repoErr := fc.Client.GetRepo(ctx, r.Owner, r.Repo)
+				if repoErr != nil {
+					printer.StepWarn(fmt.Sprintf("[%s] Could not get repo info for schedule setup: %v", repoFullName, repoErr))
+					continue
+				}
 
-			schedErr := setupGitLabPipelineSchedules(ctx, fc.Client, printer, r.Owner, r.Repo, targetRepo.DefaultBranch)
-			if schedErr != nil {
-				printer.StepWarn(fmt.Sprintf("[%s] Pipeline schedule setup failed: %v", repoFullName, schedErr))
+				schedErr := setupGitLabPipelineSchedules(ctx, fc.Client, printer, r.Owner, r.Repo, targetRepo.DefaultBranch)
+				if schedErr != nil {
+					printer.StepWarn(fmt.Sprintf("[%s] Pipeline schedule setup failed: %v", repoFullName, schedErr))
+				}
 			}
 
 			healGitLabResourceGroups(ctx, glClient, printer, r.Owner, r.Repo)

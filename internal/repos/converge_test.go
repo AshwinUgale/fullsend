@@ -485,12 +485,12 @@ func TestConverge_ExistingSecretsSkipInference(t *testing.T) {
 		t.Fatalf("Converge() error: %v", err)
 	}
 
-	// Secrets exist so the repo is partially installed; convergence
-	// repairs missing components (workflow, variables) without needing
-	// inference flags.
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Errorf("expected 1 converged (secrets exist, missing components repaired), got %d", len(converged))
+	// Secrets exist but the workflow is not on the default branch, so
+	// this is still a fresh install (ReuseSecrets skips rewriting them).
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Errorf("expected 1 installed (secrets exist, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
@@ -743,26 +743,30 @@ func TestConverge_PartialSecretState(t *testing.T) {
 		t.Fatalf("Converge() batch error: %v", err)
 	}
 
-	// One secret exists so repo is partially installed; convergence
-	// repairs the missing secret and other components.
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Fatalf("expected 1 converged (partial secret repaired), got %d", len(converged))
+	// One secret exists but the workflow is not on the default branch,
+	// so this is still a fresh install. Install writes the missing secret.
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Fatalf("expected 1 installed (partial secret, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
 			t.Errorf("unexpected failure: %s/%s: %v", f.Owner, f.Repo, f.Error)
 		}
 	}
-	// Verify the missing secret was written.
-	hasSecretAdd := false
-	for _, a := range converged[0].Actions {
-		if a.Component == "secret:FULLSEND_GCP_WIF_PROVIDER" && a.Action == "add" {
-			hasSecretAdd = true
-		}
+	if !fc.Secrets["acme/api/FULLSEND_GCP_WIF_PROVIDER"] {
+		t.Error("expected Install to write missing FULLSEND_GCP_WIF_PROVIDER secret")
 	}
-	if !hasSecretAdd {
-		t.Error("expected add action for missing FULLSEND_GCP_WIF_PROVIDER secret")
+	// The already-present secret must be left untouched: overwriting it
+	// (e.g. because ReuseSecrets is all-or-nothing) could silently
+	// retarget an already-written GCP secret binding to a different
+	// --inference-project or resolved WIF provider on a partial-state
+	// re-run.
+	for _, rec := range fc.CreatedSecrets {
+		if rec.Owner == "acme" && rec.Repo == "api" && rec.Name == "FULLSEND_GCP_PROJECT_ID" {
+			t.Error("expected already-present FULLSEND_GCP_PROJECT_ID secret to be left untouched, but Install rewrote it")
+		}
 	}
 }
 
@@ -1105,11 +1109,12 @@ func TestConverge_ExistingSecretsWithRegionVar(t *testing.T) {
 		t.Fatalf("Converge() error: %v", err)
 	}
 
-	// Secrets exist, so repo is partially installed; convergence
-	// repairs missing components (workflow, variables).
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Errorf("expected 1 converged (existing secrets + region, missing components repaired), got %d", len(converged))
+	// Secrets exist but the workflow is not on the default branch, so
+	// this is still a fresh install.
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Errorf("expected 1 installed (existing secrets + region, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
@@ -3714,5 +3719,377 @@ func TestConverge_VendorGitLabEmitsWarning(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "GitLab CI templates do not yet reference the vendored binary") {
 		t.Errorf("unexpected warning: %s", warnings[0])
+	}
+}
+
+func TestWorkflowPresent(t *testing.T) {
+	if workflowPresent(nil) {
+		t.Error("nil components should not report workflow present")
+	}
+	if workflowPresent([]ComponentStatus{
+		{Name: "secret:FULLSEND_GCP_PROJECT_ID", Present: true},
+		{Name: "var:FULLSEND_GCP_REGION", Present: true},
+	}) {
+		t.Error("secrets/vars without workflow should not report workflow present")
+	}
+	if !workflowPresent([]ComponentStatus{
+		{Name: "workflow", Present: true},
+	}) {
+		t.Error("present workflow component should report workflow present")
+	}
+	if workflowPresent([]ComponentStatus{
+		{Name: "workflow", Present: false},
+	}) {
+		t.Error("absent workflow component should not report workflow present")
+	}
+}
+
+func gitlabRequiredScaffoldPaths() []string {
+	return []string{
+		".gitlab/ci/fullsend-pipeline.yml",
+		".gitlab/ci/fullsend-agent.yml",
+		".gitlab/ci/fullsend-dispatch.yml",
+		".gitlab/ci/fullsend-poll.yml",
+		".fullsend/config.yaml",
+		".gitlab-ci.yml",
+	}
+}
+
+func assertGitLabScaffoldComplete(t *testing.T, files []forge.TreeFile) {
+	t.Helper()
+	paths := make(map[string]bool, len(files))
+	for _, f := range files {
+		paths[f.Path] = true
+	}
+	for _, expected := range gitlabRequiredScaffoldPaths() {
+		if !paths[expected] {
+			t.Errorf("missing required GitLab scaffold file %q", expected)
+		}
+	}
+}
+
+// TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath
+// reproduces #7417: variables/secrets written before the initialization
+// MR merges must not flip the second run onto the upgrade path.
+func TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("first Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("first Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("first Converge() expected 1 installed, got %d", len(result.Installed()))
+	}
+	if !result.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("first Converge() expected NeedsGitLabPostInstall=true: nothing existed before this run, so bot token/schedule setup must run")
+	}
+	sc.mu.Lock()
+	firstFiles := append([]forge.TreeFile(nil), sc.files...)
+	firstInstalled := append([]bool(nil), sc.installed...)
+	sc.mu.Unlock()
+	if len(firstInstalled) != 1 {
+		t.Fatalf("first Converge() expected 1 scaffold commit, got %d", len(firstInstalled))
+	}
+	if firstInstalled[0] {
+		t.Error("first Converge() passed installed=true; want fresh-install metadata")
+	}
+	assertGitLabScaffoldComplete(t, firstFiles)
+
+	// Simulate the CLI's GitLab post-install step (bot token + pipeline
+	// schedule setup) succeeding after the first run, since that setup
+	// lives outside Converge and NeedsGitLabPostInstall=true is what
+	// triggers it. Converge alone never writes these artifacts.
+	fc.Secrets["acme/api/"+forge.SecretForgeToken] = true
+	fc.PipelineSchedules["acme/api"] = []forge.PipelineSchedule{
+		{Description: "fullsend slash poll"},
+		{Description: "fullsend event poll"},
+	}
+
+	// Second run with the same default-branch state: secrets and the
+	// GitLab post-install artifacts exist from the first run, but the
+	// workflow file is still absent from the default branch.
+	sc2 := &spyScaffoldCommit{}
+	result2, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc2.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("second Converge() error: %v", err)
+	}
+	if len(result2.Failed()) != 0 {
+		t.Fatalf("second Converge() failed: %v", result2.Failed()[0].Error)
+	}
+	if len(result2.Installed()) != 1 {
+		t.Fatalf("second Converge() expected 1 installed (still no workflow on default branch), got installed=%d converged=%d current=%d",
+			len(result2.Installed()), len(result2.Converged()), len(result2.AlreadyCurrent()))
+	}
+	// #7417's re-run scenario: variables/secrets/bot token already exist
+	// from the first run. Installed stays true (workflow still absent),
+	// but re-running GitLab post-install (bot token + schedule setup)
+	// would revoke and recreate the live fullsend-bot PAT and pipeline
+	// schedules — it must not run a second time.
+	if result2.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("second Converge() expected NeedsGitLabPostInstall=false: components already existed from the first run, so bot token/schedule setup must not re-run")
+	}
+	sc2.mu.Lock()
+	secondFiles := append([]forge.TreeFile(nil), sc2.files...)
+	secondInstalled := append([]bool(nil), sc2.installed...)
+	sc2.mu.Unlock()
+	if len(secondInstalled) != 1 {
+		t.Fatalf("second Converge() expected 1 scaffold commit, got %d", len(secondInstalled))
+	}
+	if secondInstalled[0] {
+		t.Error("second Converge() passed installed=true; would select a bump branch instead of fullsend/scaffold-install")
+	}
+	assertGitLabScaffoldComplete(t, secondFiles)
+}
+
+// TestConverge_PartialSecretsWithoutWorkflowStayOnFreshInstallPath covers
+// the anyComponentPresent false-positive: a leftover secret from a
+// previous incomplete run must not select the upgrade path.
+func TestConverge_PartialSecretsWithoutWorkflowStayOnFreshInstallPath(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	fc.Secrets["acme/api/"+forge.SecretGCPProjectID] = true
+	fc.Secrets["acme/api/"+forge.SecretGCPWIFProvider] = true
+	fc.VariableValues["acme/api/"+forge.VarGCPRegion] = "us-central1"
+
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("expected 1 installed (workflow missing), got installed=%d converged=%d current=%d",
+			len(result.Installed()), len(result.Converged()), len(result.AlreadyCurrent()))
+	}
+	sc.mu.Lock()
+	installedFlags := append([]bool(nil), sc.installed...)
+	files := append([]forge.TreeFile(nil), sc.files...)
+	sc.mu.Unlock()
+	if len(installedFlags) != 1 {
+		t.Fatalf("expected 1 scaffold commit, got %d", len(installedFlags))
+	}
+	if installedFlags[0] {
+		t.Error("passed installed=true despite missing workflow; would open a bump MR")
+	}
+	assertGitLabScaffoldComplete(t, files)
+}
+
+// TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets covers a
+// review finding on #7418: NeedsGitLabPostInstall must be gated on the
+// GitLab-specific post-install artifacts (the bot token secret and
+// pipeline schedules), not on any probed component being present. A
+// retry after Install() succeeded but the GitLab post-install step
+// failed (or never ran) must still report NeedsGitLabPostInstall=true so
+// the retry actually repairs the missing bot token/schedules, instead of
+// silently skipping them just because unrelated GCP inference secrets
+// already exist.
+func TestConverge_GitLab_NeedsPostInstallSurvivesUnrelatedSecrets(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	fc.Secrets["acme/api/"+forge.SecretGCPProjectID] = true
+	fc.Secrets["acme/api/"+forge.SecretGCPWIFProvider] = true
+
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("expected 1 installed, got %d", len(result.Installed()))
+	}
+	if !result.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("expected NeedsGitLabPostInstall=true: pre-existing GCP inference secrets must not mask a missing GitLab bot token/schedules")
+	}
+}
+
+// TestConverge_GitLab_NeedsPostInstallFlagsForPartialArtifacts covers a
+// review finding on #7418: gitlabPostInstallDone (and the needsBotToken /
+// needsSchedules present-checks it wraps) were only exercised directly by
+// TestGitlabPostInstallDone, never through Converge itself. A regression
+// that set NeedsGitLabBotToken / NeedsGitLabPipelineSchedules from the
+// combined needsPostInstall flag instead of their own present-checks would
+// still pass every other integration test, since those only cover the two
+// poles (nothing present, everything present). This exercises the partial
+// states in between: bot token present but schedules missing, schedules
+// present but the bot token missing, and the bot token plus only one of
+// the two schedules present.
+func TestConverge_GitLab_NeedsPostInstallFlagsForPartialArtifacts(t *testing.T) {
+	tests := []struct {
+		name            string
+		seed            func(fc *forge.FakeClient, full string)
+		wantBotToken    bool
+		wantSchedules   bool
+		wantPostInstall bool
+	}{
+		{
+			name: "bot token present, schedules missing",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.Secrets[full+"/"+forge.SecretForgeToken] = true
+			},
+			wantBotToken:    false,
+			wantSchedules:   true,
+			wantPostInstall: true,
+		},
+		{
+			name: "schedules present, bot token missing",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.PipelineSchedules[full] = []forge.PipelineSchedule{
+					{Description: "fullsend slash poll"},
+					{Description: "fullsend event poll"},
+				}
+			},
+			wantBotToken:    true,
+			wantSchedules:   false,
+			wantPostInstall: true,
+		},
+		{
+			name: "bot token plus only one schedule present",
+			seed: func(fc *forge.FakeClient, full string) {
+				fc.Secrets[full+"/"+forge.SecretForgeToken] = true
+				fc.PipelineSchedules[full] = []forge.PipelineSchedule{
+					{Description: "fullsend slash poll"},
+				}
+			},
+			wantBotToken:    false,
+			wantSchedules:   true,
+			wantPostInstall: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClientForBatch("acme/api")
+			tt.seed(fc, "acme/api")
+
+			cfg := gitlabConvergeCfg("acme/api")
+			cfg.Direct = false
+			sc := &spyScaffoldCommit{}
+			result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+			if err != nil {
+				t.Fatalf("Converge() error: %v", err)
+			}
+			if len(result.Failed()) != 0 {
+				t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+			}
+			if len(result.Installed()) != 1 {
+				t.Fatalf("expected 1 installed, got %d", len(result.Installed()))
+			}
+			got := result.Installed()[0]
+			if got.NeedsGitLabBotToken != tt.wantBotToken {
+				t.Errorf("NeedsGitLabBotToken = %v, want %v", got.NeedsGitLabBotToken, tt.wantBotToken)
+			}
+			if got.NeedsGitLabPipelineSchedules != tt.wantSchedules {
+				t.Errorf("NeedsGitLabPipelineSchedules = %v, want %v", got.NeedsGitLabPipelineSchedules, tt.wantSchedules)
+			}
+			if got.NeedsGitLabPostInstall != tt.wantPostInstall {
+				t.Errorf("NeedsGitLabPostInstall = %v, want %v", got.NeedsGitLabPostInstall, tt.wantPostInstall)
+			}
+		})
+	}
+}
+
+// TestGitlabPostInstallDone is a table test for gitlabPostInstallDone
+// covering partial GitLab post-install states. gitlabPostInstallDone is
+// a strict AND of the bot-token secret and every pipeline-schedule
+// component; before this test, only the two poles (nothing present, and
+// token+both schedules present) were exercised, so a regression that
+// weakened the AND to check only the token (or only the schedules)
+// would still pass. This covers the partial states in between: token
+// only, schedules only (no token), and token plus just one of the two
+// schedules.
+func TestGitlabPostInstallDone(t *testing.T) {
+	specs := PipelineScheduleSpecs()
+	if len(specs) < 2 {
+		t.Fatalf("expected at least 2 pipeline schedule specs, got %d", len(specs))
+	}
+	tokenComponent := "secret:" + forge.SecretForgeToken
+	schedule0 := specs[0].ComponentName
+	schedule1 := specs[1].ComponentName
+
+	tests := []struct {
+		name       string
+		components []ComponentStatus
+		want       bool
+	}{
+		{
+			name:       "nil components",
+			components: nil,
+			want:       false,
+		},
+		{
+			name:       "empty components",
+			components: []ComponentStatus{},
+			want:       false,
+		},
+		{
+			name: "GCP secrets only (unrelated to GitLab post-install)",
+			components: []ComponentStatus{
+				{Name: "secret:" + forge.SecretGCPProjectID, Present: true},
+				{Name: "secret:" + forge.SecretGCPWIFProvider, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token only, no schedules",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "both schedules only, no bot token",
+			components: []ComponentStatus{
+				{Name: schedule0, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus only the first schedule",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule0, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus only the second schedule",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: false,
+		},
+		{
+			name: "bot token plus both schedules",
+			components: []ComponentStatus{
+				{Name: tokenComponent, Present: true},
+				{Name: schedule0, Present: true},
+				{Name: schedule1, Present: true},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := gitlabPostInstallDone(tt.components); got != tt.want {
+				t.Errorf("gitlabPostInstallDone(%+v) = %v, want %v", tt.components, got, tt.want)
+			}
+		})
 	}
 }

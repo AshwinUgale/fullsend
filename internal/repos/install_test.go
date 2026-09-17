@@ -39,14 +39,16 @@ func (f *fakeScaffoldCommit) fn() ScaffoldCommitFunc {
 }
 
 type spyScaffoldCommit struct {
-	mu    sync.Mutex
-	files []forge.TreeFile
+	mu        sync.Mutex
+	files     []forge.TreeFile
+	installed []bool
 }
 
 func (s *spyScaffoldCommit) fn() ScaffoldCommitFunc {
-	return func(_ context.Context, _, _ string, files []forge.TreeFile, _ bool, _ bool) error {
+	return func(_ context.Context, _, _ string, files []forge.TreeFile, _ bool, installed bool) error {
 		s.mu.Lock()
 		s.files = append(s.files, files...)
+		s.installed = append(s.installed, installed)
 		s.mu.Unlock()
 		return nil
 	}
