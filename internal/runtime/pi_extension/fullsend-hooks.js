@@ -11,9 +11,8 @@
 //
 // Contract with the scripts (v1 and v2 — fullsend#6357):
 //   stdin  {"tool_name", "tool_input", "tool_result", "tool_response", "cwd"}
-//          ("cwd" = this process's working directory, the checkout pi was
-//          started in and child shells cannot move; the redact stage scopes
-//          its bare-JWT skip to paths under it)
+//          ("cwd" = this process's working directory, the checkout; the
+//          redact stage scopes its bare-JWT skip to paths under it)
 //   stdout PreToolUse: exit != 0 or {"decision":"block","reason"} blocks.
 //          PostToolUse: {"hookSpecificOutput":{"updatedToolOutput": <text>}}
 //          (v2) or {"tool_result": <text>} (v1) replaces the result text;

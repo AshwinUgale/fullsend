@@ -61,27 +61,18 @@ _PREFIX_PATTERNS: list[tuple[str, re.Pattern]] = [
     # workforce doc shows ya29.dr.), whose short first segment would
     # otherwise defeat the length quantifier.
     ("google_oauth_token", re.compile(r"ya29\.(?:[a-z]{1,2}\.)?[A-Za-z0-9_-]{20,}")),
-    # Bare three-segment JWTs (and OIDC/WIF STS tokens) carry no
-    # surrounding context for the structural patterns to anchor on; the
-    # Go side of this shape is likewise in #6603, not on main. Skipped for
-    # file content inside the checkout — see content_skips. The start
-    # anchor keeps the scan linear: unanchored, every `eyJ` in a dot-free
-    # run was a match start and the greedy segment backtracked each time —
-    # quadratic, ~4 s at 120 KB and minutes at 1 MB. Under Claude Code the
-    # hook has 30 s and fails open, so a stall passes the output through
-    # unredacted; pi (60 s) and codex (25 s) fail closed and withhold the
-    # result. Anchored, a token must start within five characters of a
-    # non-token character or of the output's start, which reaches the
-    # delimiters that are themselves token characters or end in one: a
-    # diff's removed line (`-`, `--`, and `\n-` inside a JSON string), a
-    # JSON escape (`\n`, `\u0022`), a percent-encoded byte (`%3D`, `%253D`),
-    # a glued short flag (` -p`). Each alternative fires at one fixed
-    # offset from the start of a token run, so a run is scanned at most
-    # twice however long it is. What drops is a token glued to six or more
-    # token characters mid-line (` prefix_eyJ…`); the ghs_…_eyJ wrap among
-    # those masks whole as github_server_token above. Go's RE2 is linear
-    # without any of this (and has no lookbehind), so #6603's pattern
-    # stays unanchored.
+    # Bare three-segment JWTs (OIDC/WIF STS tokens included) have no
+    # surrounding context for the structural patterns; the Go side is in
+    # #6603. Skipped for file content inside the checkout — see content_skips.
+    # The start anchor keeps the scan linear: unanchored, every `eyJ` in a
+    # dot-free run restarted the greedy segment (quadratic — minutes at 1 MB,
+    # past the hook timeout on every runtime). A token must start within five
+    # characters of a non-token character or of the output's start, which
+    # still reaches delimiters made of token characters (a diff's `-`, a JSON
+    # `\n`, a `%3D`, a glued ` -p`), and each alternative fires at one fixed
+    # offset, so a run is scanned at most twice. Dropped: a token glued to six
+    # or more token characters mid-line. Go's RE2 is linear and has no
+    # lookbehind, so #6603's pattern stays unanchored.
     (
         "jwt",
         re.compile(
@@ -105,37 +96,15 @@ _PREFIX_PATTERNS: list[tuple[str, re.Pattern]] = [
     ),
 ]
 
-# Tools whose response is file content, with the tool_input key naming the
-# path they read. A bare JWT has no fixture-shaped escape — a jwt.io example
-# in a test file is byte-for-byte a valid token — so masking it there rewrites
-# what the agent reads and edits against (the failure mode described under the
-# structural patterns below) without catching a live credential: the
-# STS/OIDC/WIF tokens the pattern exists for surface in Bash, WebFetch and MCP
-# output, which stays covered. The skip is limited to paths inside the
-# checkout because the runner delivers its own OIDC token file to the sandbox
-# workspace, beside the checkout, and a Read or Grep of that must still mask.
-# The checkout is found from the hook input's cwd: the runtime starts there,
-# and cwd follows the agent's persisted cd, so the nearest ancestor holding
-# .git is the root — searched only strictly below SANDBOX_WORKSPACE, so a cd
-# that resolves out of the checkout, or a .git planted at or above the
-# workspace, yields no root and no skip. A cwd inside a submodule narrows the
-# root to the submodule, so superproject fixtures mask again there — the safe
-# direction. A path is normalized before it is resolved, because the runtime
-# opens the normalized path while a bare realpath would follow a symlink
-# before applying '..'; and any '..' segment refuses the skip outright, as no
-# fixture needs one. So do the forms a runtime rewrites before opening — see
-# _REWRITTEN_PATH — and any path whose resolved target does not exist: the
-# hook can only scope what it was sent, and pi opens a different entry for a
-# Unicode-space name, and may for a missing one, than the raw path names. A
-# copy, hard link or move of an outside file into the checkout is file content
-# like any other and is not distinguished — the same class as a Bash transform
-# of the token (base64, cut), which the hook never caught. An adapter that
-# sends no cwd gets no skip, i.e. masks; Claude Code sends its working
-# directory, the pi adapter its process working directory, and the codex
-# adapter the cwd of codex's own hook input — which scopes nothing there
-# today, since codex's apply_patch input carries no file path and its reads
-# are shell output. Adapters translate tool names to Claude's vocabulary
-# before the chain runs, so the names here apply everywhere.
+# File-content tools and the tool_input key naming the path they read. The
+# bare-JWT pattern is skipped for these when the path is inside the checkout:
+# a jwt.io-style fixture is byte-for-byte a valid token, so masking it there
+# rewrites what the agent edits against without catching a live credential
+# (those surface in Bash, WebFetch and MCP output, which stay covered). The
+# runner's own OIDC token file sits beside the checkout, not in it, and still
+# masks. See content_skips for how the checkout is found and which paths are
+# refused. Adapters translate tool names to Claude's vocabulary before the
+# chain runs, so the names here apply everywhere.
 _TOOL_PATH_KEY = {
     "Read": "file_path",
     "Edit": "file_path",
@@ -146,56 +115,37 @@ _TOOL_PATH_KEY = {
     "Grep": "path",
 }
 _CHECKOUT_SKIPS = frozenset({"jwt"})
-# Path forms a runtime rewrites before opening, while its adapter forwards the
-# raw argument, so the hook cannot see what was opened. The rewrites pi 0.85.0
-# applies (dist/utils/paths.js, dist/core/tools/path-utils.js): every file
-# tool strips a leading '@', expands '~', turns a file:// URL into a path and
-# replaces the Unicode spaces U+00A0, U+2000-U+200A, U+202F, U+205F and U+3000
-# with an ASCII space; a Read of a missing name additionally retries variants
-# (NFD, curly quote, narrow NBSP before AM/PM, NFD with curly quote). The hook
-# refuses the first three forms here (any URL scheme, broader than pi's
-# rewrite on purpose), refuses any non-ASCII whitespace in content_skips, and
-# grants the skip only for a resolved target that exists: the hook runs after
-# the tool, so the file pi opened exists by then, and a missing target means a
-# Read may have opened a variant of the name. A rewrite this list does not
-# name is caught only if it leaves the raw name unresolvable.
+# Path forms a runtime rewrites before opening while its adapter forwards the
+# raw argument, so the hook cannot see what was opened. pi 0.85.0 (dist/utils/
+# paths.js, dist/core/tools/path-utils.js) strips a leading '@', expands '~',
+# turns a file:// URL into a path, replaces Unicode spaces with an ASCII space
+# and retries NFD/curly-quote variants of a missing name. Refused here: '@'
+# and any URL scheme (broader than pi's rewrite on purpose). Refused in
+# content_skips: '~', non-ASCII whitespace, and a resolved target that does
+# not exist (the hook runs after the tool, so what pi opened exists by then).
 _REWRITTEN_PATH = re.compile(r"^(?:@|[A-Za-z][A-Za-z0-9+.\-]*://)")
 
-# The sandbox workspace: the checkout lives in a proper subdirectory of it and
-# the runner's own files (the OIDC token among them) beside it. The checkout
-# root is only ever looked for BELOW this boundary, so a .git entry an agent
-# plants at or above it can never widen the root to those files. The value is
-# the runner's constant (internal/sandbox.SandboxWorkspace); an override is
-# taken only from this process's command line (sandbox_workspace_from_argv,
-# the seam the subprocess tests use), which the runner-owned hooks.json and
-# the pi adapter build without it. It is not read from environment variables:
-# Claude Code applies a checkout's .claude/settings.json env block to hook
-# processes over the launch environment (observed locally on 2.1.235; the
-# sandbox image pins CLAUDE_CODE_VERSION in images/sandbox/Containerfile), and
-# the sandbox .env every launch command sources lives in the sandbox user's
-# workspace. A checkout's settings can also add hook invocations of their own,
-# with any argv; one that skips prints nothing, which the protocol reads as
-# unchanged, so it does not undo the runner's rewrite — repo-supplied hooks
-# are the exposure docs/runtimes/claude.md already names. Not covered here is
-# the interpreter itself: under claude and pi the hook runs as a bare python3
-# resolved through a PATH that puts the agent-writable workspace bin first,
-# with PYTHONPATH and the user site directory honoured, so code the agent
-# controls can run inside any hook process (codex isolates its adapter, see
-# codex_config.go); that predates this change. Residual: the boundary is the
-# workspace, not the checkout, so a .git planted in another runner-owned
-# subdirectory (.env.d, host_files credentials) can still be a root through a
-# plain cd into it or an in-checkout symlink; only a bare JWT no structural
-# shape covers would skip there, and only for files under that subdirectory.
+# The sandbox workspace: the checkout is a proper subdirectory of it and the
+# runner's own files (the OIDC token among them) sit beside the checkout. The
+# checkout root is only ever looked for strictly BELOW this boundary, so a
+# .git an agent plants at or above it cannot widen the root to those files.
+# The value is the runner's constant (internal/sandbox.SandboxWorkspace,
+# pinned by a Go test). The only override is this process's own command line
+# (sandbox_workspace_from_argv, the seam the subprocess tests use) — never the
+# environment, which a checkout's .claude/settings.json env block can shape
+# under Claude Code. Residuals, pre-existing or out of scope: under claude and
+# pi the hook runs as a bare python3 resolved through an agent-writable PATH
+# (codex isolates its adapter, see codex_config.go); and a .git planted in
+# another runner-owned subdirectory (.env.d) can still be a root for files
+# under it, where only a bare JWT no structural shape covers would skip.
 SANDBOX_WORKSPACE: str = "/sandbox/workspace"
 _WORKSPACE_FLAG = "--sandbox-workspace="
 
 
 def sandbox_workspace_from_argv(argv: list[str]) -> str | None:
-    """The boundary override, taken only from this process's command line:
-    the seam the subprocess tests use. The runner-owned hooks.json and the pi
-    adapter build that command line and never pass it; SANDBOX_WORKSPACE says
-    what else can reach this process. The first --sandbox-workspace= flag
-    decides; a relative value yields no override."""
+    """The boundary override, from this process's command line only (the
+    subprocess tests' seam; the runner-owned hooks.json and the pi adapter
+    never pass it). The first flag decides; a relative value is ignored."""
     for arg in argv:
         if arg.startswith(_WORKSPACE_FLAG):
             value = arg[len(_WORKSPACE_FLAG) :]
@@ -224,7 +174,14 @@ def content_skips(hook_input: dict) -> frozenset[str]:
     """Patterns redact_text skips for this call: the bare-JWT pattern when a
     file-content tool is called with a path inside the checkout, nothing
     otherwise.
-    Anything malformed or unresolvable means no skip, never an exception."""
+
+    The checkout is the nearest ancestor of cwd holding a .git entry, searched
+    strictly below SANDBOX_WORKSPACE (a cwd inside a submodule narrows the root
+    to it, the safe direction). The path is normalized, then resolved; a '..'
+    segment, a '~' path, a rewritten form (_REWRITTEN_PATH), non-ASCII
+    whitespace or a missing target refuses the skip. An adapter that sends no
+    cwd gets no skip. Anything malformed or unresolvable means no skip, never
+    an exception."""
     tool_name = hook_input.get("tool_name")
     cwd = hook_input.get("cwd")
     if not isinstance(tool_name, str) or tool_name not in _TOOL_PATH_KEY:
