@@ -154,12 +154,18 @@ Install runs in two phases:
 1. **Manifest add** — repos specified as positional arguments that are
    not already in the manifest are added (requires `--forge`).
 2. **Convergence** — every repo flows through a single probe → diff →
-   apply pipeline. New repos are fully provisioned (scaffold files,
-   variables, secrets). Already-installed repos are checked for
-   component drift (workflow, thin callers, variables, secrets,
-   pipeline schedules), scaffold content drift, and scaffold ref drift. Missing or drifted
-   components are repaired automatically; ref updates are committed as
-   PRs (or direct pushes with `--direct`).
+   apply pipeline. Repos whose shim workflow is not yet on the default
+   branch are treated as new and fully provisioned (scaffold files,
+   variables, secrets) onto the initialization branch. That includes a
+   re-run while the initialization PR/MR is still open: variables and
+   secrets may already exist from the first run, but the installer
+   still updates the same initialization PR/MR rather than opening a
+   separate upgrade PR. Repos whose workflow is already on the default
+   branch are checked for component drift (workflow, thin callers,
+   variables, secrets, pipeline schedules), scaffold content drift, and
+   scaffold ref drift. Missing or drifted components are repaired
+   automatically; ref updates are committed as PRs (or direct pushes
+   with `--direct`).
 
 > **Prerequisite:** GCP WIF provisioning (`fullsend inference provision`)
 > must be completed before running install. For self-managed mints,
