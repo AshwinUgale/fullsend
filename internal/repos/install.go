@@ -6,6 +6,7 @@ package repos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -252,7 +253,7 @@ func Install(ctx context.Context, cfg InstallConfig,
 		progress(repoFullName, "poll-state", "Retiring legacy poll-state variables")
 		for _, a := range retireGitLabLegacyVars(ctx, client, cfg.Owner, cfg.Repo, false, progress) {
 			if a.Action == "error" {
-				return result, fmt.Errorf("%s", a.Detail)
+				return result, errors.New(a.Detail)
 			}
 		}
 	}

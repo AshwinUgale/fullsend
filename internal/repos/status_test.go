@@ -148,7 +148,10 @@ func TestProbeRepoState_GitLab_InstalledViaSchedule(t *testing.T) {
 	}
 }
 
-func TestProbeRepoState_GitLab_InstalledViaPollStateBranch(t *testing.T) {
+func TestProbeRepoState_GitLab_PollStateBranchAlone_NotInstalled(t *testing.T) {
+	// Poll-state branch presence alone must not be treated as install
+	// evidence: uninstall does not yet delete these branches (#7381), so
+	// branch-only evidence would misclassify an uninstalled repo.
 	fc := forge.NewFakeClient()
 	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
 	if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", poll.PollStateBranchSlash, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
@@ -159,8 +162,30 @@ func TestProbeRepoState_GitLab_InstalledViaPollStateBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeRepoState() error = %v", err)
 	}
-	if !state.Installed {
-		t.Fatal("Installed = false, want true (poll-state branch)")
+	if state.Installed {
+		t.Fatal("Installed = true, want false (poll-state branch alone is not sufficient evidence)")
+	}
+}
+
+func TestProbeRepoState_GitLab_PostUninstall_NotInstalled(t *testing.T) {
+	// Simulates the state immediately after uninstall: the bot token and
+	// pipeline schedules are gone (uninstall deletes them), but the
+	// poll-state branches remain (branch deletion deferred to #7381).
+	// This must not be classified as installed.
+	fc := forge.NewFakeClient()
+	fc.FileContents["acme/api/.gitlab/ci/fullsend-dispatch.yml"] = []byte("  ref: v2.5.0\n")
+	for _, branch := range gitlabPollStateBranches {
+		if err := fc.ForceCommitFileToBranch(context.Background(), "acme", "api", branch, poll.PollStateFileName, "seed", []byte(`{"hmac":"x"}`)); err != nil {
+			t.Fatalf("seed %s: %v", branch, err)
+		}
+	}
+
+	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
+	if err != nil {
+		t.Fatalf("ProbeRepoState() error = %v", err)
+	}
+	if state.Installed {
+		t.Fatal("Installed = true, want false (post-uninstall: token and schedules gone, only leftover branches remain)")
 	}
 }
 
@@ -174,19 +199,6 @@ func TestProbeRepoState_GitLab_NotInstalled(t *testing.T) {
 	}
 	if state.Installed {
 		t.Fatal("Installed = true, want false when GitLab has only a workflow file")
-	}
-}
-
-func TestProbeRepoState_GitLab_PollStateBranchError(t *testing.T) {
-	fc := forge.NewFakeClient()
-	fc.Errors["GetFileContentAtRef"] = fmt.Errorf("api down")
-
-	state, err := ProbeRepoState(context.Background(), fc, "acme", "api", ForgeGitLab, GitLabForgeConfig())
-	if err == nil {
-		t.Fatal("expected error when poll-state branch check fails")
-	}
-	if state.Installed {
-		t.Fatal("Installed = true, want false when poll-state check errors")
 	}
 }
 

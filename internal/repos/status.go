@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
-	"github.com/fullsend-ai/fullsend/internal/poll"
 )
 
 // RepoState holds the installation state of a single repo as read
@@ -33,9 +32,13 @@ func ProbeRepoState(ctx context.Context, client forge.Client, owner, repo, forge
 
 	// Check required components — these distinguish per-repo from per-org.
 	// GitHub uses FULLSEND_MINT_URL. GitLab poller state no longer lives
-	// in CI/CD variables, so install evidence is the bot token, a poll
-	// schedule, or a poll-state branch.
-	hasRequiredVar := false
+	// in CI/CD variables, so install evidence is the bot token or a poll
+	// schedule. Poll-state branch presence alone is deliberately not
+	// treated as install evidence: uninstall deletes the bot token and
+	// pipeline schedules but does not yet delete the poll-state branches
+	// (deferred to #7381), so a leftover branch from a prior install
+	// would otherwise misclassify an uninstalled repo as installed.
+	hasRequiredComponent := false
 	state := RepoState{}
 	for _, c := range components {
 		if !c.Present {
@@ -43,31 +46,18 @@ func ProbeRepoState(ctx context.Context, client forge.Client, owner, repo, forge
 		}
 		switch {
 		case c.Name == "var:"+forge.VarMintURL:
-			hasRequiredVar = true
+			hasRequiredComponent = true
 			state.MintURL = c.Actual
 		case c.Name == "secret:"+forge.SecretForgeToken:
-			hasRequiredVar = true
+			hasRequiredComponent = true
 		case strings.HasPrefix(c.Name, "schedule:"):
-			hasRequiredVar = true
+			hasRequiredComponent = true
 		case c.Name == "workflow":
 			state.FullsendRef = c.Actual
 		}
 	}
 
-	if !hasRequiredVar && forgeName == ForgeGitLab {
-		for _, branch := range gitlabPollStateBranches {
-			_, err := client.GetFileContentAtRef(ctx, owner, repo, poll.PollStateFileName, branch)
-			if err == nil {
-				hasRequiredVar = true
-				break
-			}
-			if !forge.IsNotFound(err) {
-				return RepoState{}, fmt.Errorf("checking poll-state branch %s for %s/%s: %w", branch, owner, repo, err)
-			}
-		}
-	}
-
-	if !hasRequiredVar {
+	if !hasRequiredComponent {
 		return RepoState{}, nil
 	}
 	state.Installed = true
