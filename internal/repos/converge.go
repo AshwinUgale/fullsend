@@ -177,8 +177,10 @@ func secretsPresent(components []ComponentStatus) bool {
 		hasComponent(components, "secret:"+forge.SecretGCPWIFProvider)
 }
 
-// anyComponentPresent returns true when at least one probed component exists,
-// indicating the repo has been at least partially installed.
+// anyComponentPresent returns true when at least one probed component exists.
+// Used by status to report a repo as installed once any fullsend resource
+// has been written, including variables or secrets created before the
+// initialization MR merges.
 func anyComponentPresent(components []ComponentStatus) bool {
 	for _, c := range components {
 		if c.Present {
@@ -186,6 +188,14 @@ func anyComponentPresent(components []ComponentStatus) bool {
 		}
 	}
 	return false
+}
+
+// workflowPresent returns true when the forge-specific shim workflow file
+// exists on the default branch. That file is the only component that cannot
+// land until the initialization MR merges, so it is the signal that the repo
+// is actually installed rather than mid-install.
+func workflowPresent(components []ComponentStatus) bool {
+	return hasComponent(components, "workflow")
 }
 
 // Converge processes every repo in the manifest through a single
@@ -490,9 +500,16 @@ func convergeRepo(ctx context.Context,
 	}
 
 	hasSecrets := secretsPresent(d.components)
-	isNew := !anyComponentPresent(d.components)
+	// Treat the repo as new until the workflow file is on the default
+	// branch. Variables and secrets are written before the scaffold
+	// commit (see Install), so anyComponentPresent is true while an
+	// initialization MR is still open. Routing that state through the
+	// upgrade path selects a version-specific bump branch and leaves
+	// the original MR incomplete (#7417).
+	isNew := !workflowPresent(d.components)
 
-	// Case 1: Nothing installed — perform full install via Install().
+	// Case 1: Workflow not on the default branch — full install via
+	// Install(), which always uses fresh-install PR metadata.
 	if isNew {
 		progress(repoFullName, "install", "Not installed, performing full install")
 
@@ -574,7 +591,7 @@ func convergeRepo(ctx context.Context,
 		return cr
 	}
 
-	// Case 2: At least one component exists — converge component by component.
+	// Case 2: Workflow is on the default branch — converge component by component.
 
 	// 2a: Check for variable drift.
 	varActions := convergeVariables(ctx, resolved, d.components, cfg.DryRun, progress)

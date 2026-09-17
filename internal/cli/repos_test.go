@@ -2043,6 +2043,100 @@ gitlab:
 		"GitLab scaffold MR title must include [skip ci] to suppress dispatch")
 }
 
+func gitlabInstallOpts(manifestPath string, fc *forge.FakeClient) *reposInstallConfig {
+	return &reposInstallConfig{
+		manifest:               manifestPath,
+		concurrency:            4,
+		roles:                  []string{"triage"},
+		inferenceProject:       "inf-proj",
+		inferenceProjectNumber: "123456789",
+		inferenceRegion:        "us-central1",
+		testClient:             fc,
+	}
+}
+
+func assertGitLabInitMRComplete(t *testing.T, fc *forge.FakeClient) {
+	t.Helper()
+	require.NotEmpty(t, fc.CreatedProposals, "expected an initialization MR")
+	for _, p := range fc.CreatedProposals {
+		assert.Equal(t, repos.DefaultScaffoldBranch, p.Head,
+			"expected initialization branch, got %s (title %q)", p.Head, p.Title)
+		assert.NotContains(t, p.Head, repos.ScaffoldBumpBranchPrefix,
+			"upgrade bump branch must not be created while init MR is open")
+	}
+	require.NotEmpty(t, fc.CommittedFilesToBranch, "expected files committed to the init branch")
+	paths := make(map[string]bool)
+	for _, rec := range fc.CommittedFilesToBranch {
+		assert.Equal(t, repos.DefaultScaffoldBranch, rec.Branch,
+			"scaffold files must land on %s, got %s", repos.DefaultScaffoldBranch, rec.Branch)
+		for _, f := range rec.Files {
+			paths[f.Path] = true
+		}
+	}
+	for _, expected := range []string{
+		".gitlab/ci/fullsend-pipeline.yml",
+		".gitlab/ci/fullsend-agent.yml",
+		".gitlab/ci/fullsend-dispatch.yml",
+		".gitlab/ci/fullsend-poll.yml",
+		".fullsend/config.yaml",
+		".gitlab-ci.yml",
+	} {
+		assert.True(t, paths[expected], "init MR branch missing %s", expected)
+	}
+}
+
+// TestRunReposInstall_GitLabRerunBeforeInitMergeReusesInitMR reproduces
+// #7417: two consecutive installs without merging between them must keep
+// a single complete initialization MR instead of opening a bump MR.
+func TestRunReposInstall_GitLabRerunBeforeInitMergeReusesInitMR(t *testing.T) {
+	gitlabManifest := `version: 1
+gitlab:
+  url: https://gitlab.example.com
+  fullsend_ref: v0.43.0
+  repos:
+    - name: group/project
+`
+	manifestPath := writeTestManifest(t, gitlabManifest)
+
+	fc := forge.NewFakeClient()
+	fc.InstallationToken = true
+	fc.AuthenticatedUser = "fullsend-app[bot]"
+	fc.CollaboratorPermissions = map[string]string{
+		"group/project/fullsend-app[bot]": "write",
+	}
+	fc.Repos = []forge.Repository{{
+		FullName:      "group/project",
+		Name:          "project",
+		DefaultBranch: "main",
+	}}
+
+	_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	assertGitLabInitMRComplete(t, fc)
+
+	firstCommitCount := len(fc.CommittedFilesToBranch)
+
+	// FakeClient.CommitFilesToBranch also writes FileContents (the
+	// default-branch store). Strip those files so the second probe sees
+	// the unmerged-MR state: variables/secrets exist, workflow does not.
+	for path := range fc.FileContents {
+		delete(fc.FileContents, path)
+	}
+
+	_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	assertGitLabInitMRComplete(t, fc)
+
+	// FakeClient.CreateChangeProposal always records a new proposal, so
+	// the assertion is on branch identity: both runs must target the
+	// initialization branch, never a version bump branch.
+	for _, rec := range fc.CommittedFilesToBranch {
+		assert.Equal(t, repos.DefaultScaffoldBranch, rec.Branch)
+		assert.NotContains(t, rec.Branch, repos.ScaffoldBumpBranchPrefix)
+	}
+	if len(fc.CommittedFilesToBranch) < firstCommitCount {
+		t.Fatalf("second install dropped commits: first=%d second=%d", firstCommitCount, len(fc.CommittedFilesToBranch))
+	}
+}
+
 func TestRunReposInstall_VendorFlagPersistsOnNewRepo(t *testing.T) {
 	manifestPath := writeTestManifest(t, testManifestYAML)
 	fc := newInstallFakeClient("acme/api", "acme/web")

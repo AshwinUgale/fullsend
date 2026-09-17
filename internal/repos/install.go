@@ -119,10 +119,12 @@ type InstallResult struct {
 // ScaffoldCommitFunc delivers scaffold files to a repository and returns
 // any error encountered.
 //
-// The installed parameter indicates whether this repo already had fullsend
-// components before this operation (true = upgrade, false = fresh install).
-// CLI implementations use this to select the appropriate commit message and
-// PR title without making extra API calls.
+// The installed parameter indicates whether the shim workflow is already
+// on the default branch (true = upgrade, false = fresh install). CLI
+// implementations use this to select the appropriate commit message, PR
+// title, and branch. Fresh-install metadata (DefaultScaffoldBranch) must
+// be used until that workflow lands, even if variables or secrets already
+// exist from a previous incomplete run.
 //
 // The CLI layer provides an implementation wrapping layers.CommitScaffoldFiles,
 // which adds retry on non-fast-forward errors, branch-protection fallback to

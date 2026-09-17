@@ -485,12 +485,12 @@ func TestConverge_ExistingSecretsSkipInference(t *testing.T) {
 		t.Fatalf("Converge() error: %v", err)
 	}
 
-	// Secrets exist so the repo is partially installed; convergence
-	// repairs missing components (workflow, variables) without needing
-	// inference flags.
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Errorf("expected 1 converged (secrets exist, missing components repaired), got %d", len(converged))
+	// Secrets exist but the workflow is not on the default branch, so
+	// this is still a fresh install (ReuseSecrets skips rewriting them).
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Errorf("expected 1 installed (secrets exist, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
@@ -743,26 +743,20 @@ func TestConverge_PartialSecretState(t *testing.T) {
 		t.Fatalf("Converge() batch error: %v", err)
 	}
 
-	// One secret exists so repo is partially installed; convergence
-	// repairs the missing secret and other components.
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Fatalf("expected 1 converged (partial secret repaired), got %d", len(converged))
+	// One secret exists but the workflow is not on the default branch,
+	// so this is still a fresh install. Install writes the missing secret.
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Fatalf("expected 1 installed (partial secret, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
 			t.Errorf("unexpected failure: %s/%s: %v", f.Owner, f.Repo, f.Error)
 		}
 	}
-	// Verify the missing secret was written.
-	hasSecretAdd := false
-	for _, a := range converged[0].Actions {
-		if a.Component == "secret:FULLSEND_GCP_WIF_PROVIDER" && a.Action == "add" {
-			hasSecretAdd = true
-		}
-	}
-	if !hasSecretAdd {
-		t.Error("expected add action for missing FULLSEND_GCP_WIF_PROVIDER secret")
+	if !fc.Secrets["acme/api/FULLSEND_GCP_WIF_PROVIDER"] {
+		t.Error("expected Install to write missing FULLSEND_GCP_WIF_PROVIDER secret")
 	}
 }
 
@@ -1105,11 +1099,12 @@ func TestConverge_ExistingSecretsWithRegionVar(t *testing.T) {
 		t.Fatalf("Converge() error: %v", err)
 	}
 
-	// Secrets exist, so repo is partially installed; convergence
-	// repairs missing components (workflow, variables).
-	converged := result.Converged()
-	if len(converged) != 1 {
-		t.Errorf("expected 1 converged (existing secrets + region, missing components repaired), got %d", len(converged))
+	// Secrets exist but the workflow is not on the default branch, so
+	// this is still a fresh install.
+	installed := result.Installed()
+	if len(installed) != 1 {
+		t.Errorf("expected 1 installed (existing secrets + region, workflow missing), got installed=%d converged=%d",
+			len(installed), len(result.Converged()))
 	}
 	if len(result.Failed()) != 0 {
 		for _, f := range result.Failed() {
@@ -3715,4 +3710,145 @@ func TestConverge_VendorGitLabEmitsWarning(t *testing.T) {
 	if !strings.Contains(warnings[0], "GitLab CI templates do not yet reference the vendored binary") {
 		t.Errorf("unexpected warning: %s", warnings[0])
 	}
+}
+
+func TestWorkflowPresent(t *testing.T) {
+	if workflowPresent(nil) {
+		t.Error("nil components should not report workflow present")
+	}
+	if workflowPresent([]ComponentStatus{
+		{Name: "secret:FULLSEND_GCP_PROJECT_ID", Present: true},
+		{Name: "var:FULLSEND_GCP_REGION", Present: true},
+	}) {
+		t.Error("secrets/vars without workflow should not report workflow present")
+	}
+	if !workflowPresent([]ComponentStatus{
+		{Name: "workflow", Present: true},
+	}) {
+		t.Error("present workflow component should report workflow present")
+	}
+	if workflowPresent([]ComponentStatus{
+		{Name: "workflow", Present: false},
+	}) {
+		t.Error("absent workflow component should not report workflow present")
+	}
+}
+
+func gitlabRequiredScaffoldPaths() []string {
+	return []string{
+		".gitlab/ci/fullsend-pipeline.yml",
+		".gitlab/ci/fullsend-agent.yml",
+		".gitlab/ci/fullsend-dispatch.yml",
+		".gitlab/ci/fullsend-poll.yml",
+		".fullsend/config.yaml",
+		".gitlab-ci.yml",
+	}
+}
+
+func assertGitLabScaffoldComplete(t *testing.T, files []forge.TreeFile) {
+	t.Helper()
+	paths := make(map[string]bool, len(files))
+	for _, f := range files {
+		paths[f.Path] = true
+	}
+	for _, expected := range gitlabRequiredScaffoldPaths() {
+		if !paths[expected] {
+			t.Errorf("missing required GitLab scaffold file %q", expected)
+		}
+	}
+}
+
+// TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath
+// reproduces #7417: variables/secrets written before the initialization
+// MR merges must not flip the second run onto the upgrade path.
+func TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("first Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("first Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("first Converge() expected 1 installed, got %d", len(result.Installed()))
+	}
+	sc.mu.Lock()
+	firstFiles := append([]forge.TreeFile(nil), sc.files...)
+	firstInstalled := append([]bool(nil), sc.installed...)
+	sc.mu.Unlock()
+	if len(firstInstalled) != 1 {
+		t.Fatalf("first Converge() expected 1 scaffold commit, got %d", len(firstInstalled))
+	}
+	if firstInstalled[0] {
+		t.Error("first Converge() passed installed=true; want fresh-install metadata")
+	}
+	assertGitLabScaffoldComplete(t, firstFiles)
+
+	// Second run with the same default-branch state: secrets exist from
+	// the first Install (written before the MR merge) but the workflow
+	// file is still absent from the default branch.
+	sc2 := &spyScaffoldCommit{}
+	result2, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc2.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("second Converge() error: %v", err)
+	}
+	if len(result2.Failed()) != 0 {
+		t.Fatalf("second Converge() failed: %v", result2.Failed()[0].Error)
+	}
+	if len(result2.Installed()) != 1 {
+		t.Fatalf("second Converge() expected 1 installed (still no workflow on default branch), got installed=%d converged=%d current=%d",
+			len(result2.Installed()), len(result2.Converged()), len(result2.AlreadyCurrent()))
+	}
+	sc2.mu.Lock()
+	secondFiles := append([]forge.TreeFile(nil), sc2.files...)
+	secondInstalled := append([]bool(nil), sc2.installed...)
+	sc2.mu.Unlock()
+	if len(secondInstalled) != 1 {
+		t.Fatalf("second Converge() expected 1 scaffold commit, got %d", len(secondInstalled))
+	}
+	if secondInstalled[0] {
+		t.Error("second Converge() passed installed=true; would select a bump branch instead of fullsend/scaffold-install")
+	}
+	assertGitLabScaffoldComplete(t, secondFiles)
+}
+
+// TestConverge_PartialSecretsWithoutWorkflowStayOnFreshInstallPath covers
+// the anyComponentPresent false-positive: a leftover secret from a
+// previous incomplete run must not select the upgrade path.
+func TestConverge_PartialSecretsWithoutWorkflowStayOnFreshInstallPath(t *testing.T) {
+	fc := newFakeClientForBatch("acme/api")
+	fc.Secrets["acme/api/"+forge.SecretGCPProjectID] = true
+	fc.Secrets["acme/api/"+forge.SecretGCPWIFProvider] = true
+	fc.VariableValues["acme/api/"+forge.VarGCPRegion] = "us-central1"
+
+	cfg := gitlabConvergeCfg("acme/api")
+	cfg.Direct = false
+	sc := &spyScaffoldCommit{}
+	result, err := Converge(context.Background(), cfg, newTestClientFactory(fc), sc.fn(), noopProgress)
+	if err != nil {
+		t.Fatalf("Converge() error: %v", err)
+	}
+	if len(result.Failed()) != 0 {
+		t.Fatalf("Converge() failed: %v", result.Failed()[0].Error)
+	}
+	if len(result.Installed()) != 1 {
+		t.Fatalf("expected 1 installed (workflow missing), got installed=%d converged=%d current=%d",
+			len(result.Installed()), len(result.Converged()), len(result.AlreadyCurrent()))
+	}
+	sc.mu.Lock()
+	installedFlags := append([]bool(nil), sc.installed...)
+	files := append([]forge.TreeFile(nil), sc.files...)
+	sc.mu.Unlock()
+	if len(installedFlags) != 1 {
+		t.Fatalf("expected 1 scaffold commit, got %d", len(installedFlags))
+	}
+	if installedFlags[0] {
+		t.Error("passed installed=true despite missing workflow; would open a bump MR")
+	}
+	assertGitLabScaffoldComplete(t, files)
 }

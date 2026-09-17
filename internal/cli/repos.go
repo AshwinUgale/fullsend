@@ -457,9 +457,11 @@ func newReposInstallCmd() *cobra.Command {
 		Long: `Idempotent convergence operator for repos.yaml manifest entries.
 
 For repos not yet in the manifest, adds them (requires --forge). For repos
-not yet provisioned, scaffolds workflow files and writes variables/secrets.
-For already-installed repos, reconciles variable drift and upgrades scaffold
-refs to match the manifest.
+whose shim workflow is not yet on the default branch, scaffolds workflow
+files and writes variables/secrets onto the initialization branch, including
+re-runs while an initialization PR/MR is still open. For repos whose workflow
+is already on the default branch, reconciles variable drift and upgrades
+scaffold refs to match the manifest.
 
 When repos are specified as positional arguments, only those repos are
 processed. Glob patterns (e.g. "acme/*") are matched against manifest
