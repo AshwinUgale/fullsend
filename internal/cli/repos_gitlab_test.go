@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,6 +232,63 @@ func TestSetupGitLabBotToken_NilClient_FallbackToken(t *testing.T) {
 	assert.Equal(t, "glpat-manual", token)
 	require.Len(t, fake.CreatedSecrets, 1)
 	assert.Equal(t, forge.SecretForgeToken, fake.CreatedSecrets[0].Name)
+}
+
+func TestGitLabBotPATExpiresAt_UsesUTCNotLocal(t *testing.T) {
+	// UTC-12 at 22:00 on Jan 2 is Jan 3 10:00 UTC. Local + 1 year is
+	// 2027-01-02; UTC + 1 year is 2027-01-03. GitLab evaluates expires_at
+	// in UTC, so the helper must not use the local calendar date.
+	loc := time.FixedZone("UTC-12", -12*3600)
+	now := time.Date(2026, 1, 2, 22, 0, 0, 0, loc)
+	assert.Equal(t, "2027-01-03", gitlabBotPATExpiresAt(now))
+
+	// UTC+14 at 00:30 on Jan 2 is Jan 1 10:30 UTC. Local + 1 year would
+	// overshoot the instance date (and can exceed GitLab's 365-day max).
+	ahead := time.FixedZone("UTC+14", 14*3600)
+	nowAhead := time.Date(2026, 1, 2, 0, 30, 0, 0, ahead)
+	assert.Equal(t, "2027-01-01", gitlabBotPATExpiresAt(nowAhead))
+}
+
+func TestSetupGitLabBotToken_CreatesDeveloperPATWithUTCExpiry(t *testing.T) {
+	ctx := context.Background()
+
+	var capturedLevel float64
+	var capturedExpires string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/group%2Fproject/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			capturedLevel, _ = body["access_level"].(float64)
+			capturedExpires, _ = body["expires_at"].(string)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 1, "name": "fullsend-bot", "token": "glpat-dev", "active": true,
+			})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	glClient, err := gitlab.New("test-token", gitlab.WithBaseURL(srv.URL))
+	require.NoError(t, err)
+
+	fake := &forge.FakeClient{}
+	var buf bytes.Buffer
+	printer := ui.New(&buf)
+
+	before := gitlabBotPATExpiresAt(time.Now())
+	token, err := setupGitLabBotToken(ctx, fake, glClient, printer, "group", "project", "")
+	after := gitlabBotPATExpiresAt(time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, "glpat-dev", token)
+	assert.Equal(t, float64(gitlabAccessLevelDeveloper), capturedLevel)
+	assert.True(t, capturedExpires == before || capturedExpires == after,
+		"expires_at %q not in {%q, %q}", capturedExpires, before, after)
 }
 
 func TestSetupGitLabBotToken_NilClient_NoFallback(t *testing.T) {

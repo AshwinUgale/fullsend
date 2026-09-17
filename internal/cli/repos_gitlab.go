@@ -14,9 +14,17 @@ import (
 )
 
 const (
-	gitlabBotTokenName          = "fullsend-bot"
-	gitlabAccessLevelMaintainer = 40
+	gitlabBotTokenName         = "fullsend-bot"
+	gitlabAccessLevelDeveloper = 30
 )
+
+// gitlabBotPATExpiresAt returns the YYYY-MM-DD expiry GitLab expects for a
+// project access token. GitLab evaluates expires_at in UTC, so a local-time
+// date can already be in the past when the token is created and the PAT is
+// born active:false. Compute against UTC.
+func gitlabBotPATExpiresAt(now time.Time) string {
+	return now.UTC().AddDate(1, 0, 0).Format("2006-01-02")
+}
 
 // setupGitLabBotToken creates a project access token for the fullsend bot
 // identity and stores it as a protected CI/CD variable (FULLSEND_FORGE_TOKEN).
@@ -44,11 +52,20 @@ func setupGitLabBotToken(ctx context.Context, client forge.Client, glClient *git
 			}
 		}
 
-		expiresAt := time.Now().AddDate(1, 0, 0).Format("2006-01-02")
-		// "api" scope is required because the bot token is used for CI/CD variable
-		// management, pipeline schedule creation, and merge request operations.
+		expiresAt := gitlabBotPATExpiresAt(time.Now())
+		// "api" scope is required for REST and GraphQL (MR operations, poll-state
+		// branch writes). Developer (30) is sufficient now that poller state lives
+		// on unprotected branches rather than Maintainer-only CI/CD variables.
+		//
+		// Residual dependency: the poller also creates pipelines via
+		// CreatePipeline on the protected default branch (ADR 0067), which
+		// requires merge or push access. Developer (30) satisfies that under
+		// GitLab's default "Protected" preset, but a repo whose branch
+		// protection restricts merge and push to Maintainers will get a 403
+		// on pipeline creation. This is not verified or granted here; see
+		// docs/cli/repos.md "GitLab bot token".
 		token, err := glClient.CreateProjectAccessToken(ctx, owner, repo, gitlabBotTokenName,
-			[]string{"api"}, gitlabAccessLevelMaintainer, expiresAt)
+			[]string{"api"}, gitlabAccessLevelDeveloper, expiresAt)
 		if err != nil {
 			printer.StepWarn(fmt.Sprintf("Project access token creation failed: %v", err))
 			if fallbackToken != "" {

@@ -355,7 +355,7 @@ Secrets and variables are deployed at different scopes depending on the installa
 #### GitLab
 
 **Target repo CI/CD variables (protected):**
-- `FULLSEND_FORGE_TOKEN` — Project access token for bot identity (stored as protected CI/CD variable)
+- `FULLSEND_FORGE_TOKEN` — Project access token for bot identity at Developer (30) access (stored as protected CI/CD variable). Reduced from Maintainer (40) once poller state moved onto unprotected poll-state branches (#7381).
 - `FULLSEND_DISPATCH_SECRET` — Shared HMAC secret for signing dispatch variables and poll-state documents. Auto-provisioned by `repos install` (on both fresh installs and re-run/convergence of already-enrolled repos) as a masked, protected CI/CD variable.
 - `FULLSEND_POLL_MODE` — Pipeline schedule variable (`"slash"` or `"events"`); set automatically per schedule during install, not a project-level CI/CD variable
 
@@ -365,7 +365,8 @@ re-run/convergence of already-enrolled repos) creates
 with an initial HMAC-signed `state.json`. Legacy CI/CD-variable values
 are folded in when present (`*Fast` → slash, `*Full` + `LabelState` →
 events); otherwise each branch is an empty signed baseline. Existing
-branch documents are not overwritten.
+branch documents are not overwritten. `repos uninstall` deletes both
+branches via `DeleteRef` (a missing branch is ignored).
 
 **Retired poll-state CI/CD variables (#7343 phase 3b / #7380):** the
 following seven variables are no longer seeded at install. `repos

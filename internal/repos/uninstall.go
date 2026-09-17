@@ -282,24 +282,32 @@ func uninstallRepoResources(ctx context.Context, cfg ResolvedConfig, direct bool
 	result.VarsDeleted = varsDeleted
 	result.SecretsDeleted = secretsDeleted
 
-	if varErr != nil && secretErr != nil {
-		result.Error = errors.Join(varErr, secretErr)
-		progress(fullName, "cleanup", fmt.Sprintf("Failed: %v; %v", varErr, secretErr))
-		return result
+	var branchErr error
+	if cfg.Forge == ForgeGitLab {
+		branchErr = deleteGitLabPollStateBranches(ctx, client, owner, repo)
 	}
-	if varErr != nil {
-		result.Error = varErr
-		progress(fullName, "vars", fmt.Sprintf("Failed: %v", varErr))
-		return result
-	}
-	if secretErr != nil {
-		result.Error = secretErr
-		progress(fullName, "secrets", fmt.Sprintf("Failed: %v", secretErr))
+
+	if joined := errors.Join(varErr, secretErr, branchErr); joined != nil {
+		result.Error = joined
+		progress(fullName, "cleanup", fmt.Sprintf("Failed: %v", joined))
 		return result
 	}
 
 	progress(fullName, "done", fmt.Sprintf("Removed: %d vars, %d secrets", varsDeleted, secretsDeleted))
 	return result
+}
+
+// deleteGitLabPollStateBranches removes the two poll-state branches created
+// at install. A missing branch (never seeded, or already deleted) is not
+// an error so uninstall stays idempotent on older installs.
+func deleteGitLabPollStateBranches(ctx context.Context, client forge.Client, owner, repo string) error {
+	var errs []error
+	for _, branch := range gitlabPollStateBranches {
+		if err := client.DeleteRef(ctx, owner, repo, "heads/"+branch); err != nil && !errors.Is(err, forge.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("deleting poll-state branch %s: %w", branch, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // splitOwnerRepo splits "owner/repo" (or "group/subgroup/project" for
