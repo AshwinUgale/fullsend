@@ -407,19 +407,53 @@ func loadBaseChain(
 			return nil, nil, fmt.Errorf("resolving containment root: %w", err)
 		}
 		absWorkspace = filepath.Clean(absWorkspace)
-		rel, err := filepath.Rel(absWorkspace, absBasePath)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return nil, nil, fmt.Errorf("base path %q escapes workspace root", baseRef)
-		}
-
-		if visited[absBasePath] {
-			return nil, nil, fmt.Errorf("circular base reference: %s", absBasePath)
-		}
-		visited[absBasePath] = true
-
-		base, err = LoadRaw(basePath)
+		unresolvedWorkspace := absWorkspace
+		absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
 		if err != nil {
-			return nil, nil, fmt.Errorf("loading base harness %s: %w", basePath, err)
+			return nil, nil, fmt.Errorf("resolving containment root symlinks: %w", err)
+		}
+		// Preserve the lexical base reference relative to the referencing harness
+		// directory. This distinguishes explicit traversal from an intermediate
+		// symlink escape without being confused by workspace-root aliases.
+		lexicalRel, lexicalRelErr := filepath.Rel(childDir, absBasePath)
+		lexicallyEscapes := lexicalRelErr != nil || strings.HasPrefix(lexicalRel, "..")
+		// Resolve existing paths before comparing so workspace aliases such as
+		// macOS's /var and /private/var forms compare consistently.
+		resolvedBasePath, resolveErr := filepath.EvalSymlinks(absBasePath)
+		if resolveErr != nil {
+			// The base file may not exist yet, but its parent should still be
+			// canonicalized so workspace aliases compare consistently.
+			resolvedBaseDir, dirErr := filepath.EvalSymlinks(filepath.Dir(absBasePath))
+			if dirErr != nil {
+				// The workspace and child paths may use different forms of the same
+				// alias. Reject only when neither form contains the unresolved base.
+				unresolvedRel, unresolvedRelErr := filepath.Rel(unresolvedWorkspace, absBasePath)
+				resolvedRel, resolvedRelErr := filepath.Rel(absWorkspace, absBasePath)
+				unresolvedEscapes := unresolvedRelErr != nil || strings.HasPrefix(unresolvedRel, "..")
+				resolvedEscapes := resolvedRelErr != nil || strings.HasPrefix(resolvedRel, "..")
+				if unresolvedEscapes && resolvedEscapes {
+					return nil, nil, fmt.Errorf("base path %q escapes workspace root", baseRef)
+				}
+				return nil, nil, fmt.Errorf("resolving base path symlinks: %w", dirErr)
+			}
+			resolvedBasePath = filepath.Join(resolvedBaseDir, filepath.Base(absBasePath))
+		}
+		rel, err := filepath.Rel(absWorkspace, resolvedBasePath)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			if lexicallyEscapes {
+				return nil, nil, fmt.Errorf("base path %q escapes workspace root", baseRef)
+			}
+			return nil, nil, fmt.Errorf("base path %q escapes workspace root via symlink", baseRef)
+		}
+
+		if visited[resolvedBasePath] {
+			return nil, nil, fmt.Errorf("circular base reference: %s", resolvedBasePath)
+		}
+		visited[resolvedBasePath] = true
+
+		base, err = LoadRaw(resolvedBasePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading base harness %s: %w", resolvedBasePath, err)
 		}
 
 		baseDir = filepath.Dir(absBasePath)
