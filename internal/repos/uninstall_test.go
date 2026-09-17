@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/fullsend-ai/fullsend/internal/forge"
+	"github.com/fullsend-ai/fullsend/internal/poll"
 	"github.com/fullsend-ai/fullsend/internal/scaffold"
 )
 
@@ -124,6 +125,11 @@ func TestUninstall_InstalledRepo(t *testing.T) {
 	}
 	if len(client.DeletedSecrets) != 2 {
 		t.Errorf("deleted %d secrets, want 2", len(client.DeletedSecrets))
+	}
+	for _, ref := range client.DeletedRefs {
+		if strings.Contains(ref, poll.PollStateBranchSlash) || strings.Contains(ref, poll.PollStateBranchEvents) {
+			t.Errorf("GitHub uninstall deleted poll-state ref %s", ref)
+		}
 	}
 }
 
@@ -524,6 +530,26 @@ func TestUninstall_GitLabRepo(t *testing.T) {
 			t.Error("GitHub workflow path was deleted for GitLab repo")
 		}
 	}
+
+	wantRefs := []string{
+		"acme/api/heads/" + poll.PollStateBranchSlash,
+		"acme/api/heads/" + poll.PollStateBranchEvents,
+	}
+	if len(client.DeletedRefs) != len(wantRefs) {
+		t.Errorf("DeletedRefs = %v, want %v", client.DeletedRefs, wantRefs)
+	}
+	for _, want := range wantRefs {
+		found := false
+		for _, got := range client.DeletedRefs {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DeletedRefs missing %s (got %v)", want, client.DeletedRefs)
+		}
+	}
 }
 
 func TestUninstall_GitLabConfigYaml_Deleted(t *testing.T) {
@@ -786,5 +812,52 @@ func TestUninstall_ProgressCallbacks(t *testing.T) {
 	}
 	if !hasDone {
 		t.Error("missing 'done' phase callback")
+	}
+}
+
+func TestUninstall_GitLabPollStateBranches_NotFoundOK(t *testing.T) {
+	client := newInstalledFakeGitLabClient("acme/api")
+	client.Errors["DeleteRef"] = forge.ErrNotFound
+
+	results, err := Uninstall(context.Background(), UninstallConfig{
+		Manifest:       testGitLabManifest("acme/api"),
+		Repos:          []string{"acme/api"},
+		Direct:         true,
+		MaxConcurrency: 4,
+	}, newTestClientFactory(client), uninstallCommitFn(client), nil)
+
+	if err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	r := results[0]
+	if !r.Success {
+		t.Errorf("Success = false, want true; Error = %v", r.Error)
+	}
+}
+
+func TestUninstall_GitLabPollStateBranches_DeleteError(t *testing.T) {
+	client := newInstalledFakeGitLabClient("acme/api")
+	client.Errors["DeleteRef"] = fmt.Errorf("forbidden")
+
+	results, err := Uninstall(context.Background(), UninstallConfig{
+		Manifest:       testGitLabManifest("acme/api"),
+		Repos:          []string{"acme/api"},
+		Direct:         true,
+		MaxConcurrency: 4,
+	}, newTestClientFactory(client), uninstallCommitFn(client), nil)
+
+	if err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	r := results[0]
+	if r.Success {
+		t.Error("Success = true, want false (branch deletion failed)")
+	}
+	if r.Error == nil || !strings.Contains(r.Error.Error(), "poll-state branch") {
+		t.Errorf("Error = %v, want poll-state branch deletion error", r.Error)
+	}
+	// Vars and secrets still deleted even when branch deletion fails.
+	if r.VarsDeleted != len(gitlabUninstallVars) {
+		t.Errorf("VarsDeleted = %d, want %d", r.VarsDeleted, len(gitlabUninstallVars))
 	}
 }

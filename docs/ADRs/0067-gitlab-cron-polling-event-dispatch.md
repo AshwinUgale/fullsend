@@ -304,14 +304,14 @@ updates CI/CD variables (watermark and label state persistence) via the
 API, which requires Maintainer-level access. The bot PAT is stored as a
 protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
 
-> **Update (2026-09, #7343):** Poll-state persistence (watermarks,
+> **Update (2026-09, #7343 / #7381):** Poll-state persistence (watermarks,
 > dispatched/failed-key dedup, label state) moved off CI/CD variables
 > onto two per-mode, HMAC-signed `state.json` documents committed to
 > dedicated `fullsend-poll-state-slash`/`fullsend-poll-state-events`
-> branches (see "Watermark tampering" below). This is phase 2 of #7343
-> (Developer-PAT reduction); the Maintainer-role description above
-> remains accurate until a later phase actually drops the bot PAT to
-> Developer access.
+> branches (see "Watermark tampering" below). Phase 3c (#7381) dropped
+> the created bot PAT from Maintainer (40) to Developer (30); uninstall
+> deletes both state branches. The historical Maintainer-role
+> description above is superseded.
 
 Key properties:
 

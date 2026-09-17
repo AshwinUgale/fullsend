@@ -275,7 +275,7 @@ flag is install-time only and is not stored in the manifest.
 
 ### Removing repos
 
-Remove a repo from the manifest and tear down its installation. File deletions open a PR by default (variables and secrets are deleted immediately via the API). Pass `--direct` to push file deletions to the default branch:
+Remove a repo from the manifest and tear down its installation. File deletions open a PR by default (variables and secrets are deleted immediately via the API). For GitLab repos, uninstall also deletes the `fullsend-poll-state-slash` and `fullsend-poll-state-events` branches. Pass `--direct` to push file deletions to the default branch:
 
 ```bash
 fullsend repos uninstall acme/old-api
