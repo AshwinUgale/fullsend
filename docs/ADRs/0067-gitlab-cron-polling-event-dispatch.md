@@ -304,18 +304,59 @@ updates CI/CD variables (watermark and label state persistence) via the
 API, which requires Maintainer-level access. The bot PAT is stored as a
 protected, masked CI/CD variable (`FULLSEND_FORGE_TOKEN`).
 
-> **Update (2026-09, #7343 / #7381):** Poll-state persistence (watermarks,
-> dispatched/failed-key dedup, label state) moved off CI/CD variables
-> onto two per-mode, HMAC-signed `state.json` documents committed to
-> dedicated `fullsend-poll-state-slash`/`fullsend-poll-state-events`
-> branches (see "Watermark tampering" below). Phase 3c (#7381) dropped
-> the created bot PAT from Maintainer (40) to Developer (30); uninstall
-> deletes both state branches. The historical Maintainer-role
-> description above is superseded for the CI/CD-variable rationale
-> only. It is not superseded for the #5556 "New permission requirement"
-> above: `internal/poll/dispatch.go` still calls `CreatePipeline` on the
-> protected default branch, which requires merge or push access. Under
-> GitLab's default "Protected" branch preset (Developers and
+> **Update (2026-09, #7343 / #7362 / #7381):** Poll-state persistence
+> (watermarks, dispatched/failed-key dedup, label state) moved off
+> CI/CD variables onto two per-mode, HMAC-signed `state.json`
+> documents on dedicated unprotected branches:
+>
+> | Branch | Written by | Fields |
+> |---|---|---|
+> | `fullsend-poll-state-slash` | slash poll (`*/5`) | `last_poll_at_fast`, `dispatched_keys_fast`, `failed_keys_fast`, `hmac` |
+> | `fullsend-poll-state-events` | event poll (`2,17,32,47`) | `last_poll_at_full`, `dispatched_keys_full`, `failed_keys_full`, `label_state`, `hmac` |
+>
+> Two branches keep concurrent slash+events runs from clobbering each
+> other (each mode has its own `resource_group`, but the two modes can
+> overlap) and let force-re-root pruning drop only that mode's prior
+> commit. Two files on one branch would lose the sibling file on every
+> force-re-root.
+>
+> **Force-re-root pruning.** Every save is a single
+> `ForceCommitFileToBranch` (`POST /projects/:id/repository/commits`
+> with `force: true` and `start_sha` = the repository's root commit).
+> The branch is always root + 1 commit; prior state commits become
+> unreachable. The commit message is suffixed `[skip ci]`. Force +
+> start point also creates the branch on first write.
+>
+> **HMAC.** Each document is HMAC-SHA256-signed with
+> `FULLSEND_DISPATCH_SECRET` (already provisioned for dispatch
+> signing). The MAC covers a per-branch, per-project domain prefix
+> (`fullsend-poll-state-slash/1\n` or `fullsend-poll-state-events/1\n`,
+> then `{owner/repo}\n`) plus the canonical JSON with the `hmac` field
+> cleared, so a signed file cannot be substituted across branches or
+> projects.
+>
+> **Fail-closed vs self-heal.** Secret unset → refuse to load or write
+> (fail closed). Present but missing/invalid signature, or unreadable
+> JSON → discard the branch (`DeleteRef`) and fail that cycle; the
+> next cycle recreates a fresh signed baseline. Missing branch or
+> `state.json` is *not* tampering: load a fresh baseline (watermark
+> defaults to ~1 hour ago) and the next save recreates the branch.
+> Losing a state branch therefore causes a one-time re-scan and
+> at-least-once re-dispatch of recent items, not a stall.
+>
+> **Lifecycle.** `repos install` / `repos converge` create both
+> branches with an initial signed document (seeded from legacy
+> CI/CD-variable state when present). The poller self-heals a deleted
+> branch within one cycle. `repos uninstall` deletes both branches.
+>
+> Phase 3c (#7381) dropped the created bot PAT from Maintainer (40)
+> to Developer (30); Developer can force-write and delete an
+> unprotected branch. The historical Maintainer-role description
+> above is superseded for the CI/CD-variable rationale only. It is
+> not superseded for the #5556 "New permission requirement" above:
+> `internal/poll/dispatch.go` still calls `CreatePipeline` on the
+> protected default branch, which requires merge or push access.
+> Under GitLab's default "Protected" branch preset (Developers and
 > Maintainers can merge), Developer (30) still satisfies that
 > requirement, but a repo whose branch protection restricts both merge
 > and push to Maintainers will get a 403 on pipeline creation and
@@ -378,6 +419,12 @@ exits as a no-op, wasting one pipeline invocation's CI minutes.
 This is an accepted tradeoff — the alternative (sharing a
 processed-note-IDs set or cross-reading watermarks between modes)
 adds state coupling that complicates the independent-schedule design.
+
+> **Update (2026-09, #7343):** The two watermarks named above are now
+> `last_poll_at_fast` / `last_poll_at_full` fields in the HMAC-signed
+> `state.json` on `fullsend-poll-state-slash` and
+> `fullsend-poll-state-events` respectively, not CI/CD variables. See
+> "Credential model".
 
 > **Update (2026-08, #5959):** ~~The dual-schedule architecture above was replaced
 > by a single `*/5 * * * *` schedule with automatic full-poll promotion. The
@@ -560,6 +607,18 @@ injection > insider > drift > supply chain):
 | GitLab database compromise | PAT stored in GitLab as protected CI/CD variable |
 | Audit trail | GitLab audit logs (Premium+) |
 
+> **Update (2026-09, #7343):** The table above describes the original
+> CI/CD-variable / Maintainer model. Poll state is now an HMAC-signed
+> `state.json` on Developer-writable branches, so the relevant threat
+> rows are:
+>
+> | Threat vector | Mitigation |
+> |---|---|
+> | Developer forges poll state | HMAC-SHA256 (`FULLSEND_DISPATCH_SECRET`) with per-branch and per-project domain separation. Secret unset → refuse load/write. Bad/absent signature → discard the branch and fail that cycle. |
+> | Missing poll-state branch | Not tampering: fresh baseline (watermark ~1h ago); next save recreates the branch. One-time re-scan / at-least-once re-dispatch, not a stall. |
+> | Unbounded history on state branches | Force-re-root every save on the repository's root commit (`force: true` + `start_sha`); branch stays at base + 1 commit. |
+> | `CI_DEBUG_TRACE` / protected-branch exposure of the bot PAT | Unchanged: `FULLSEND_FORGE_TOKEN` and `FULLSEND_DISPATCH_SECRET` remain protected CI/CD variables. |
+
 ### Forge abstraction
 
 [ADR 0005](0005-forge-abstraction-layer.md) requires new forges to implement
@@ -570,6 +629,14 @@ injection > insider > drift > supply chain):
 - `CreatePipelineSchedule` / `DeletePipelineSchedule` — GitLab-native; GitHub
   returns `ErrNotSupported`
 - `UpdateCIVariable` — for poll watermark management
+  > **Update (2026-09, #7343):** Poll watermarks are no longer CI/CD
+  > variables. Persistence uses `GetFileContentAtRef` /
+  > `ForceCommitFileToBranch` / `DeleteRef` on the two poll-state
+  > branches. Credential and secret writes (`FULLSEND_FORGE_TOKEN`,
+  > `FULLSEND_DISPATCH_SECRET`) use `CreateRepoSecret`, not
+  > `UpdateCIVariable`. `UpdateCIVariable` has no production callers;
+  > it remains on `forge.Client` only for non-credential CI/CD-variable
+  > operations, should any be added.
 
 A new `ErrNotSupported` sentinel (complementing the existing forge
 sentinel errors) allows forge
@@ -642,8 +709,11 @@ methods rather than adding forge-conditional logic.
    > above) rather than protected CI/CD variables, so tampering is
    > mitigated by an HMAC-SHA256 signature (`FULLSEND_DISPATCH_SECRET`,
    > per-branch and per-project domain separation) instead: a Developer
-   > without the secret cannot forge state, and the poller fails closed
-   > (discarding the branch) on a missing or invalid signature.
+   > without the secret cannot forge state. Fail-closed: secret unset
+   > refuses load/write; a missing or invalid signature discards the
+   > branch and fails that cycle. A missing branch or file is not
+   > tampering — the poller starts from a fresh baseline and the next
+   > save recreates the branch.
 4. **Schedule modification.** A Maintainer could retarget the schedule to a
    non-protected branch. Mitigated by protected variable status (bot PAT
    not exposed on non-protected branches).
@@ -676,6 +746,12 @@ methods rather than adding forge-conditional logic.
 | Issue/comment dispatch | Native events (sub-second) | Cron polling (5 min) |
 | External infrastructure | Mint Cloud Function | None for event dispatch |
 | Credential types | App key + installation token | Single bot PAT |
+
+> **Update (2026-09, #7343):** The GitLab primary credential is still
+> a single bot PAT stored as a protected CI/CD variable; it is now
+> created at Developer (30). Poller *state* is not a CI/CD variable
+> — it lives on the HMAC-signed poll-state branches described under
+> "Credential model".
 
 Implementation covers poller pseudocode, forge interface changes, CI/CD
 template scaffolding, and install flow.

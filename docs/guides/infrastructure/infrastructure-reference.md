@@ -368,6 +368,17 @@ events); otherwise each branch is an empty signed baseline. Existing
 branch documents are not overwritten. `repos uninstall` deletes both
 branches via `DeleteRef` (a missing branch is ignored).
 
+Every poller save force-re-roots the mode's branch on the repository's
+root commit (`force: true` + `start_sha`), so the branch stays at base +
+1 commit and history never grows. The poller **fails closed** when
+`FULLSEND_DISPATCH_SECRET` is unset (refuse load/write) or when a
+present `state.json` has a missing/invalid HMAC (discard the branch and
+fail that cycle). A missing branch or file is **not** tampering: the
+poller starts from a fresh baseline (watermark defaults to ~1 hour ago)
+and the next save recreates the branch. Losing a state branch therefore
+causes a one-time re-scan and at-least-once re-dispatch of recent items,
+not a stall.
+
 **Retired poll-state CI/CD variables (#7343 phase 3b / #7380):** the
 following seven variables are no longer seeded at install. `repos
 converge` migrates any still-present values into the poll-state
