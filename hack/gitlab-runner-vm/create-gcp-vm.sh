@@ -16,8 +16,8 @@
 # When done, the runner is online and accepting jobs tagged with RUNNER_TAG.
 #
 # setup.sh (step 5) is idempotent — safe to re-run in place as a
-# developer/debug convenience. Recreation (drain → delete → create) is
-# the compliance path; see issue #7257.
+# developer/debug convenience. Recreation is the two-command compliance
+# path: drain and delete with ./delete-gcp-vm.sh, then re-run create.
 #
 # Two modes:
 #   RUNNER_TOKEN — join an existing runner pool. Multiple VMs share one
@@ -340,7 +340,7 @@ echo "==> Creating VM: ${vm_name} in ${GCP_PROJECT} (${GCP_ZONE})"
 # ----------------------------------------------------------------------
 if gcloud compute instances describe "${vm_name}" \
   --project="${GCP_PROJECT}" --zone="${GCP_ZONE}" >/dev/null 2>&1; then
-  echo "ERROR: VM ${vm_name} already exists in ${GCP_PROJECT}/${GCP_ZONE} — delete it first or choose a different number" >&2
+  echo "ERROR: VM ${vm_name} already exists in ${GCP_PROJECT}/${GCP_ZONE}. To recreate it, drain and delete with ./delete-gcp-vm.sh ${vm_name} (which drains in-flight jobs), then re-run create. Or choose a different number." >&2
   exit 1
 fi
 
