@@ -102,17 +102,43 @@ feedback, a natural input-capture follow-up.
 **Redaction and size:** every part passes through security redaction
 (Unicode normalization, then secret masking) before reaching the span.
 Content is bounded at 256 KiB per iteration — each tool result at 8 KiB —
-kept as an ordered suffix; overflow drops the oldest content first.
+kept as an ordered suffix; overflow drops the oldest content first. Those
+bounds count raw bytes; the exported JSON string is bounded as well, at
+255,000 bytes, because encoding adds 9–11% at these bounds on real runs
+and up to six times on escape-dense content — a record over that is trimmed again,
+oldest first.
 Truncation is marked via `fullsend.content.truncated` on the span and
-`fullsend.truncated` on each cut part. Two cases are absent rather than
-truncated: stream lines beyond 1 MiB are skipped whole by the parser,
-and results whose content is entirely non-text (for example images)
-produce no part. A result that mixed text with non-text blocks keeps
+`fullsend.truncated` on each cut part. A tool result whose stream line
+exceeds the parser's 1 MiB bound is kept as an empty, marked
+`tool_call_response` part — the call was answered, its content is lost and
+its `is_error` unknown — provided the line shows the call id within its
+first 1 MiB, where Claude Code normally writes it (ahead of the content; an
+id serialized after the content is not recovered, and that call closes
+`unanswered`). Two cases are absent rather than truncated: any other stream
+line beyond 1 MiB is skipped whole by the parser, and results whose content is entirely non-text (for example
+images) produce no part. A result that mixed text with non-text blocks keeps
 its text and is marked `fullsend.truncated`; a failed call with empty
 output survives as a `tool_call_response` part carrying `is_error`. The SDK's span attribute length cap is
 lifted while capture is on; an explicit
 `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT` still wins and will cut content
 mid-JSON — fullsend warns on stderr at startup.
+
+**Size limits:** none of these bounds is a measured backend limit. The
+only acceptance proof is one 255,082-byte attribute, read back whole from
+the pilot MLflow backend on 2026-08-20; nothing larger was ever sent, so
+the backend's ceiling is unknown. The runner imposes nothing lower: the
+SDK cap is lifted, the exporter is OTLP over HTTP with no message limit of
+its own, and the file sink has none. The bounds stay because guessing
+wrong is costly — a backend that refuses an oversized request refuses the
+whole batch, up to 512 spans with their Level 1 metadata, and the exporter
+does not retry a refusal. On three captured review runs (117–255 tool
+results per iteration, sub-agents included) these bounds evict 28–56% of
+tool results. A 1 MiB total with the same per-result bound evicts none
+(records of 412–938 KB); raising only the per-result bound to 32 KiB
+evicts 47–91%; keeping every result whole takes 1.1–2.2 MB. So the total
+is the bound to raise first, once the size is proven on the target
+backend: send attributes of increasing size and read each back whole
+([#7415](https://github.com/fullsend-ai/fullsend/issues/7415)).
 
 **Sinks:** content rides the span to both `run-telemetry.jsonl` and the
 OTLP endpoint (when configured). Spans may contain proprietary source
@@ -138,6 +164,9 @@ the runtime reports a tool call (its arguments complete) and ends when it
 reports the result — both are runner-side receipt times, so the span
 brackets execution rather than measuring it exactly. A call with no result
 by the end of the iteration is closed with `error.type=unanswered`; a
+result whose stream line exceeded the parser's 1 MiB bound ends its span on
+receipt, marked `fullsend.tool.result_oversized` with no status and no
+`error.type` — the tool answered, and whether it failed was never decoded; a
 result whose call was never reported (its stream line was skipped) is a
 near-zero-duration span marked `fullsend.tool.unmatched`. Runtimes whose parsers
 emit no call ids (pi, codex) produce no `execute_tool` spans, and neither
@@ -210,10 +239,11 @@ The `agent` span's provider identity reflects only the parent run's serving endp
 | `fullsend.prescript.skip_reason` | `run` | Human-readable skip reason from the pre-script |
 | `fullsend.transcript_error` | `agent` | Present (`true`) when the agent exited 0 but its transcript reported an error — the span's status is Error while `exit_code` keeps the raw process exit |
 | `gen_ai.output.messages` | `agent` | Level 3 only: the iteration's conversation content as a JSON string (see Content capture) |
-| `fullsend.content.truncated` | `agent` | Level 3 only: present (`true`) when the size budget cut or dropped content, or a kept tool result is a parser-side fragment (`fullsend.truncated` on the part; no byte count) |
-| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes (content and ids) removed by the size budget |
+| `fullsend.content.truncated` | `agent` | Level 3 only: present (`true`) when the size budget cut or dropped content, or a kept tool result is a parser-side fragment or an oversized line's empty stand-in (`fullsend.truncated` on the part; no byte count) |
+| `fullsend.content.dropped_bytes` | `agent` | Level 3 only: exact part bytes removed by the size budget — content, ids, and the fixed footprint of an errored-empty or oversized stand-in part — in raw bytes whichever bound made the cut; the bytes of a skipped oversized line were never decoded and are not counted |
 | `fullsend.content.redactions` | `agent` | Level 3 only: number of security findings raised while redacting content at assembly (including findings from parts the size budget later dropped) |
 | `fullsend.tool.unmatched` | `execute_tool` | Present (`true`) when a result arrived for a call the stream never reported; the span has near-zero duration |
+| `fullsend.tool.result_oversized` | `execute_tool` | Present (`true`) when the result's stream line exceeded the parser's 1 MiB bound: the call was answered but nothing of the result was decoded, so the span has no status and no `error.type` |
 | `fullsend.tool_spans.dropped` | `agent` | Present when the iteration reported more than 1,024 tool calls: the number of `tool_use` events with a usable id that arrived past the cap, each counted once whatever its result later does; a result with no open span past the cap is not counted |
 
 ### Common attributes
@@ -222,7 +252,7 @@ The `agent` span's provider identity reflects only the parent run's serving endp
 |-----------|------------|-------------|
 | `exit_code` | `run`, `agent` | Process exit code |
 | `iteration` | `agent` | 1-based iteration index |
-| `error.type` | `execute_tool` | `tool_error` when the runtime flagged the result `is_error`; `unanswered` when the call had no result by the end of the iteration (the runtime was stopped, or the result line exceeded the 1 MiB stream cap) or the runtime reported the same call id again (the earlier open call is superseded); absent on success |
+| `error.type` | `execute_tool` | `tool_error` when the runtime flagged the result `is_error`; `unanswered` when the call had no result by the end of the iteration (the runtime was stopped, or an over-long result line showed no call id within its first 1 MiB) or the runtime reported the same call id again (the earlier open call is superseded); absent on success |
 
 ### Resource attributes
 

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -576,6 +578,53 @@ func TestContentCollector_ErroredEmptyResultKept(t *testing.T) {
 	assert.Equal(t, "toolu_errempty", part["id"])
 }
 
+func TestContentCollector_OversizedResultKeepsMarkedEmptyPart(t *testing.T) {
+	// The parser skipped the result's line: the record keeps the call's
+	// answer as an empty part marked cut, so a judge sees a lost result
+	// rather than a call with none. No text and no byte count is invented.
+	c := newContentCollector(4096)
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_big", Name: "Read"})
+	c.Handle(agentruntime.ToolResultEvent{ID: "toolu_big", Oversized: true})
+
+	res := c.Result("stop")
+	msgs := decodeOutputMessages(t, res.OutputMessages)
+	require.Len(t, msgs[0]["parts"].([]any), 2)
+	part := partAt(t, msgs, 1)
+	assert.Equal(t, "tool_call_response", part["type"])
+	assert.Equal(t, "toolu_big", part["id"])
+	assert.Equal(t, "", part["response"])
+	assert.Equal(t, true, part["fullsend.truncated"])
+	assert.NotContains(t, part, "is_error", "is_error was never decoded; it is unknown, not false")
+	assert.True(t, res.Truncated, "the span-level marker must fire for the lost result")
+	assert.Zero(t, res.DroppedBytes, "the lost line was never measured; no byte count is fabricated")
+}
+
+func TestContentCollector_PartialEmptyResultStillProducesNoPart(t *testing.T) {
+	// A result that was entirely non-text (an image) flattens to nothing.
+	// It stays absent, as documented: only a skipped line leaves a stand-in.
+	c := newContentCollector(4096)
+	c.Handle(agentruntime.ToolResultEvent{ID: "toolu_img", Partial: true})
+	assert.Empty(t, c.parts)
+	assert.Equal(t, contentResult{}, c.Result("stop"))
+}
+
+func TestContentCollector_OversizedResultPartIsEvictable(t *testing.T) {
+	// The marked-empty part costs its marker plus its id, so a run of
+	// them cannot accumulate outside the budget. Budget 16: the part
+	// (26 marker + 9 id) is evicted once 16 text bytes follow it.
+	c := newContentCollector(16)
+	c.Handle(agentruntime.ToolResultEvent{ID: "toolu_big", Oversized: true})
+	require.Equal(t, 35, c.total)
+	c.Handle(agentruntime.TextEvent{Text: "0123456789ABCDEF"})
+
+	res := c.Result("stop")
+	assert.Equal(t, 35, res.DroppedBytes)
+	msgs := decodeOutputMessages(t, res.OutputMessages)
+	parts := msgs[0]["parts"].([]any)
+	require.Len(t, parts, 1)
+	assert.Equal(t, "0123456789ABCDEF", parts[0].(map[string]any)["content"])
+}
+
 func TestContentCollector_EmptyTailDropChargesWholePart(t *testing.T) {
 	// When the boundary window lands inside a trailing multi-byte rune,
 	// the tail is empty and the part drops whole — id included — so the
@@ -748,6 +797,290 @@ func TestContentCollector_EvictsWholeOldPartsExactly(t *testing.T) {
 	}
 	assert.Equal(t, (7+33)+30+12-kept, res.DroppedBytes,
 		"evicted and budget-dropped bytes must sum exactly to original minus kept")
+}
+
+func TestContentCollector_EncodedCeilingBoundsEscapeDenseContent(t *testing.T) {
+	// The size budget counts raw bytes; JSON encoding spends six on every
+	// '<', control byte and invalid byte. The exported attribute must
+	// still fit the encoded ceiling, keeping as much of the tail as fits.
+	for _, unit := range []string{"<", "\x01", "\xff", "€\xe2\x82"} {
+		t.Run(fmt.Sprintf("%q", unit), func(t *testing.T) {
+			raw := strings.Repeat(unit, 100*1024/len(unit))
+			c := newContentCollector(200_000)
+			c.maxEncoded = 50_000
+			c.Handle(agentruntime.TextEvent{Text: raw})
+
+			res := c.Result("stop")
+			assert.LessOrEqual(t, len(res.OutputMessages), 50_000)
+			assert.Greater(t, len(res.OutputMessages), 50_000-12,
+				"the cut removes what the ceiling needs and no more than one unit beyond it")
+			msgs := decodeOutputMessages(t, res.OutputMessages)
+			part := partAt(t, msgs, 0)
+			assert.Equal(t, true, part["fullsend.truncated"])
+			assert.True(t, res.Truncated)
+			if content := part["content"].(string); utf8.ValidString(raw) {
+				assert.True(t, strings.HasSuffix(raw, content), "the cut keeps the tail")
+				assert.Equal(t, len(raw)-len(content), res.DroppedBytes, "dropped bytes stay raw bytes")
+			}
+			assert.Greater(t, res.DroppedBytes, len(raw)/2)
+			assert.Less(t, res.DroppedBytes, len(raw))
+		})
+	}
+}
+
+func TestContentCollector_EncodedCeilingDropsOldestWholeAndNeverCutsAToolCall(t *testing.T) {
+	events := []agentruntime.AgentEvent{
+		agentruntime.ToolUseEvent{ID: "toolu_a", Name: "Bash", Summary: "ls"},
+		agentruntime.ToolResultEvent{ID: "toolu_a", Result: strings.Repeat("r", 1000)},
+		agentruntime.TextEvent{Text: "final answer"},
+	}
+	whole := newContentCollector(4096)
+	for _, e := range events {
+		whole.Handle(e)
+	}
+	full := whole.Result("stop").OutputMessages
+
+	// Over by the whole tool_call (its encoding and comma) plus 50: the
+	// oldest part is dropped whole, and the next part's head pays the 50
+	// and the 26-byte marker the cut adds. 'r' encodes one to one.
+	call, err := json.Marshal(contentPart{Type: "tool_call", ID: "toolu_a", Name: "Bash", Summary: "ls"})
+	require.NoError(t, err)
+	c := newContentCollector(4096)
+	c.maxEncoded = len(full) - (len(call) + 1) - 50
+	for _, e := range events {
+		c.Handle(e)
+	}
+	res := c.Result("stop")
+
+	assert.Len(t, res.OutputMessages, c.maxEncoded, "the cut removes exactly what is owed")
+	msgs := decodeOutputMessages(t, res.OutputMessages)
+	parts := msgs[0]["parts"].([]any)
+	require.Len(t, parts, 2, "the tool_call is dropped whole, never cut")
+	result := partAt(t, msgs, 0)
+	assert.Equal(t, "tool_call_response", result["type"])
+	assert.Equal(t, strings.Repeat("r", 1000-76), result["response"])
+	assert.Equal(t, true, result["fullsend.truncated"])
+	assert.Equal(t, "final answer", partAt(t, msgs, 1)["content"], "the ending is untouched")
+	assert.NotContains(t, partAt(t, msgs, 1), "fullsend.truncated")
+	assert.True(t, res.Truncated)
+	assert.Equal(t, 13+76, res.DroppedBytes, "the call's 13 raw bytes and the 76 cut from the response")
+}
+
+func TestContentCollector_EncodedCeilingStopsOnceAWholeDropPaysTheDebt(t *testing.T) {
+	events := []agentruntime.AgentEvent{
+		agentruntime.ToolUseEvent{ID: "toolu_a", Name: "Bash", Summary: "ls"},
+		agentruntime.ToolResultEvent{ID: "toolu_a", Result: strings.Repeat("r", 200)},
+		agentruntime.TextEvent{Text: "final answer"},
+	}
+	whole := newContentCollector(4096)
+	for _, e := range events {
+		whole.Handle(e)
+	}
+	full := whole.Result("stop").OutputMessages
+
+	// Over by exactly the tool_call and its comma: dropping it pays the
+	// debt to zero, so the next part is neither cut nor marked.
+	call, err := json.Marshal(contentPart{Type: "tool_call", ID: "toolu_a", Name: "Bash", Summary: "ls"})
+	require.NoError(t, err)
+	c := newContentCollector(4096)
+	c.maxEncoded = len(full) - (len(call) + 1)
+	for _, e := range events {
+		c.Handle(e)
+	}
+	res := c.Result("stop")
+
+	assert.Len(t, res.OutputMessages, c.maxEncoded)
+	result := partAt(t, decodeOutputMessages(t, res.OutputMessages), 0)
+	assert.Equal(t, strings.Repeat("r", 200), result["response"])
+	assert.NotContains(t, result, "fullsend.truncated")
+	assert.Equal(t, 13, res.DroppedBytes)
+}
+
+func TestContentCollector_EncodedCeilingCutsAnAlreadyMarkedPartExactly(t *testing.T) {
+	// A result the per-result cap already cut carries its marker, so a
+	// ceiling cut adds none and owes no reserve for one. On live streams
+	// this is the usual head part: every capped result is marked.
+	events := []agentruntime.AgentEvent{
+		agentruntime.ToolResultEvent{ID: "toolu_a", Result: strings.Repeat("r", maxToolResultBytes+100)},
+		agentruntime.TextEvent{Text: "final answer"},
+	}
+	whole := newContentCollector(maxContentBytes)
+	for _, e := range events {
+		whole.Handle(e)
+	}
+	before := whole.Result("stop")
+
+	c := newContentCollector(maxContentBytes)
+	c.maxEncoded = len(before.OutputMessages) - 50
+	for _, e := range events {
+		c.Handle(e)
+	}
+	res := c.Result("stop")
+
+	assert.Len(t, res.OutputMessages, c.maxEncoded, "exactly the 50 bytes owed are cut")
+	part := partAt(t, decodeOutputMessages(t, res.OutputMessages), 0)
+	assert.Equal(t, strings.Repeat("r", maxToolResultBytes-50), part["response"])
+	assert.Equal(t, true, part["fullsend.truncated"])
+	assert.Equal(t, before.DroppedBytes+50, res.DroppedBytes)
+}
+
+func TestContentCollector_EncodedCeilingChargesFlagFootprintsOnWholeDrop(t *testing.T) {
+	events := []agentruntime.AgentEvent{
+		agentruntime.ToolResultEvent{ID: "toolu_big", Oversized: true},
+		agentruntime.ToolResultEvent{ID: "toolu_err", IsError: true},
+		agentruntime.TextEvent{Text: "final answer"},
+	}
+	whole := newContentCollector(4096)
+	for _, e := range events {
+		whole.Handle(e)
+	}
+	full := whole.Result("stop").OutputMessages
+
+	c := newContentCollector(4096)
+	c.maxEncoded = len(full) - 150
+	for _, e := range events {
+		c.Handle(e)
+	}
+	res := c.Result("stop")
+
+	msgs := decodeOutputMessages(t, res.OutputMessages)
+	require.Len(t, msgs[0]["parts"].([]any), 1)
+	assert.Equal(t, "final answer", partAt(t, msgs, 0)["content"])
+	assert.Equal(t, (truncatedFootprint+9)+(isErrorFootprint+9), res.DroppedBytes,
+		"flagged empty parts charge their fixed footprint plus id on the ceiling path too")
+}
+
+func TestContentCollector_EncodedCeilingLeavesAFittingRecordUntouched(t *testing.T) {
+	events := []agentruntime.AgentEvent{
+		agentruntime.ToolUseEvent{ID: "toolu_a", Name: "Bash", Summary: "ls"},
+		agentruntime.ToolResultEvent{ID: "toolu_a", Result: "<ok>"},
+		agentruntime.TextEvent{Text: "final answer"},
+	}
+	whole := newContentCollector(4096)
+	for _, e := range events {
+		whole.Handle(e)
+	}
+	want := whole.Result("stop")
+
+	c := newContentCollector(4096)
+	c.maxEncoded = len(want.OutputMessages) // exactly at the ceiling is within it
+	for _, e := range events {
+		c.Handle(e)
+	}
+	got := c.Result("stop")
+	assert.Equal(t, want.OutputMessages, got.OutputMessages)
+	assert.False(t, got.Truncated)
+	assert.Zero(t, got.DroppedBytes)
+
+	c = newContentCollector(4096)
+	c.maxEncoded = len(want.OutputMessages) - 1 // a single byte over is over
+	for _, e := range events {
+		c.Handle(e)
+	}
+	got = c.Result("stop")
+	assert.Less(t, len(got.OutputMessages), len(want.OutputMessages))
+	assert.True(t, got.Truncated)
+}
+
+func TestMaxEncodedContentBytes_StaysWithinTheProvenSize(t *testing.T) {
+	// The one attribute size the pilot backend is proven to accept
+	// (2026-08-20). Raising the ceiling means proving a larger size first.
+	const provenAttributeBytes = 255_082
+	assert.LessOrEqual(t, maxEncodedContentBytes, provenAttributeBytes)
+	assert.Equal(t, maxEncodedContentBytes, newContentCollector(1).maxEncoded)
+}
+
+func TestContentCollector_EncodedCeilingBelowEveryPartYieldsNoContent(t *testing.T) {
+	c := newContentCollector(4096)
+	c.maxEncoded = 10
+	c.Handle(agentruntime.ToolUseEvent{ID: "toolu_a", Name: "Bash", Summary: "ls"})
+	c.Handle(agentruntime.TextEvent{Text: "final"})
+
+	res := c.Result("stop")
+	assert.Empty(t, res.OutputMessages)
+	assert.True(t, res.Truncated)
+	assert.Equal(t, 13+5, res.DroppedBytes)
+}
+
+func TestContentCollector_EncodedCeilingHoldsForEscapeDenseRecords(t *testing.T) {
+	// Property: whatever the parts hold, the exported record fits the
+	// ceiling, stays valid JSON, keeps a suffix, and charges exactly the
+	// raw bytes it removed. The alphabet is what JSON inflates — HTML
+	// escapes, quotes, control bytes — plus multi-byte runes.
+	alphabet := []string{"<", ">", "&", "\"", "\\", "\n", "\t", "\x01", "\b", "€", "𝄞", "a", "z"}
+	rng := rand.New(rand.NewSource(6603))
+	rawBytes := func(parts []any) int {
+		n := 0
+		for _, p := range parts {
+			m := p.(map[string]any)
+			for _, k := range []string{"content", "id", "name", "summary", "response"} {
+				if v, ok := m[k].(string); ok {
+					n += len(v)
+				}
+			}
+		}
+		return n
+	}
+	for round := 0; round < 300; round++ {
+		var events []agentruntime.AgentEvent
+		for i, n := 0, 1+rng.Intn(6); i < n; i++ {
+			var b strings.Builder
+			for j, m := 0, rng.Intn(400); j < m; j++ {
+				b.WriteString(alphabet[rng.Intn(len(alphabet))])
+			}
+			id := fmt.Sprintf("toolu_%d_%d", round, i)
+			switch rng.Intn(3) {
+			case 0:
+				events = append(events, agentruntime.TextEvent{Text: b.String() + "."})
+			case 1:
+				events = append(events, agentruntime.ToolUseEvent{ID: id, Name: "Bash", Summary: b.String()})
+			default:
+				events = append(events, agentruntime.ToolResultEvent{ID: id, Result: b.String() + "."})
+			}
+		}
+		whole := newContentCollector(1 << 20)
+		for _, e := range events {
+			whole.Handle(e)
+		}
+		before := whole.Result("stop")
+		beforeParts := decodeOutputMessages(t, before.OutputMessages)[0]["parts"].([]any)
+
+		c := newContentCollector(1 << 20)
+		c.maxEncoded = 60 + rng.Intn(len(before.OutputMessages))
+		for _, e := range events {
+			c.Handle(e)
+		}
+		res := c.Result("stop")
+
+		require.LessOrEqual(t, len(res.OutputMessages), c.maxEncoded, "round %d", round)
+		kept := []any{}
+		if res.OutputMessages != "" {
+			kept = decodeOutputMessages(t, res.OutputMessages)[0]["parts"].([]any)
+		}
+		require.Equal(t, rawBytes(beforeParts)-rawBytes(kept), res.DroppedBytes-before.DroppedBytes, "round %d", round)
+		require.LessOrEqual(t, len(kept), len(beforeParts))
+		for i := range kept {
+			// A suffix: every kept part but the first is whole and in
+			// place; the first may be tail-cut, in its bulk field only —
+			// so a tool_call, which has none, is never cut.
+			want := beforeParts[len(beforeParts)-len(kept)+i]
+			if i > 0 {
+				require.Equal(t, want, kept[i], "round %d part %d", round, i)
+				continue
+			}
+			got := kept[0].(map[string]any)
+			for k, v := range want.(map[string]any) {
+				if k == "content" || k == "response" {
+					require.True(t, strings.HasSuffix(v.(string), got[k].(string)), "round %d: the cut keeps the tail of %s", round, k)
+					continue
+				}
+				require.Equal(t, v, got[k], "round %d %s", round, k)
+			}
+		}
+		if len(res.OutputMessages) < len(before.OutputMessages) {
+			require.True(t, res.Truncated, "round %d", round)
+		}
+	}
 }
 
 func TestTailToRuneBoundary(t *testing.T) {

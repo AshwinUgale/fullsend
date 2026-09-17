@@ -145,9 +145,14 @@ timestamps are runner-side receipt instants on one clock — the start is
 arguments-complete, not execution start. Attributes:
 `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`,
 `gen_ai.tool.call.id`; a result flagged `is_error` sets
-`error.type=tool_error` and status Error. A call still open when the
-iteration ends — the runtime was stopped, or its result line exceeded the
-parser's 1 MiB cap — is closed by `Finish()` as `error.type=unanswered`; a
+`error.type=tool_error` and status Error. A result whose stream line
+exceeded the parser's 1 MiB bound arrives as `ToolResultEvent{Oversized}`
+(the parser salvages the call id from the line's retained prefix) and ends
+its span at receipt marked `fullsend.tool.result_oversized`, status Unset
+and no `error.type`, since `is_error` was never decoded. A call still open
+when the iteration ends — the runtime was stopped, or an over-long result
+line showed no id in that prefix — is closed by `Finish()` as
+`error.type=unanswered`; a
 call superseded by a second `tool_use` with the same id is ended the same
 way at the reuse; a result with no matching call (its `tool_use` line was skipped) becomes a
 near-zero-duration span marked `fullsend.tool.unmatched=true`. Events without
@@ -197,8 +202,15 @@ final answer is what consumers judge) plus an 8 KiB per-tool-result
 bound (tail-kept, redacted before the cut, the part marked
 `fullsend.truncated`), with exact dropped-byte
 accounting across content, tool names, summaries, responses, and part
-ids (a third, earlier boundary — the parser's 1 MiB stream-line cap —
-drops oversized lines before any event exists), and emits
+ids, then holds the marshaled string to `maxEncodedContentBytes`
+(255,000 — just under the one size the pilot backend is proven to accept)
+by trimming the oldest content again, measured on the encoding itself and
+still charged in raw bytes (a separate, earlier boundary — the parser's 1 MiB
+stream-line cap — skips oversized lines; an oversized `tool_result` line
+still yields an empty part marked `fullsend.truncated`). None of the three
+content bounds is a measured backend limit; the constants' comments and
+[Size limits](../infrastructure/distributed-tracing.md#content-capture-level-3)
+name what blocks raising them. The collector emits
 `gen_ai.output.messages` JSON following the GenAI output-messages schema,
 including the schema-required `finish_reason` from the iteration outcome. `attachContent` records the
 content and its marker attributes on the span before either

@@ -1,7 +1,9 @@
 package runtime
 
-// streamBufSize is the bufio.Reader buffer size used by both NDJSON stream
-// parsers (Claude and OpenCode). Lines exceeding this size are skipped.
+// streamBufSize is the bufio.Reader buffer size used by every NDJSON stream
+// parser (Claude, pi, codex, OpenCode). Lines exceeding this size are
+// skipped; the Claude parser still reports an oversized tool_result line's
+// call id (ToolResultEvent.Oversized).
 const streamBufSize = 1024 * 1024 // 1 MiB
 
 // AgentEvent is the normalized event interface for runtime-agnostic rendering.
@@ -51,14 +53,17 @@ func (ToolUseEvent) agentEvent() {}
 // ToolUseEvent.ID); Result is the raw result text; IsError reports a
 // failed call, as set on the wire; Partial reports that non-text
 // content (for example image blocks) was skipped while flattening, so
-// Result is a fragment of what the wire carried. Only the Claude
-// runtime emits it today — see the runtime support matrix in
-// docs/runtimes.md.
+// Result is a fragment of what the wire carried; Oversized reports that
+// the result's stream line exceeded streamBufSize and was skipped, so
+// only ID is known — Result is empty and IsError is unknown, not false.
+// Only the Claude runtime emits it today — see the runtime support
+// matrix in docs/runtimes.md.
 type ToolResultEvent struct {
-	ID      string
-	Result  string
-	IsError bool
-	Partial bool
+	ID        string
+	Result    string
+	IsError   bool
+	Partial   bool
+	Oversized bool
 }
 
 func (ToolResultEvent) agentEvent() {}

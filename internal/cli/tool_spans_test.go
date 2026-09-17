@@ -136,6 +136,48 @@ func TestToolSpanTracker_OrphanResultIsMarkedUnmatched(t *testing.T) {
 	assert.Equal(t, codes.Error, spans[1].Status.Code)
 }
 
+func TestToolSpanTracker_OversizedResultEndsSpanMarkedNotErrored(t *testing.T) {
+	// The parser dropped the result's line, not the tool: the call was
+	// answered, so it must not read as unanswered or as a tool failure,
+	// and is_error was never seen, so it must not read as a success.
+	tr, rec, _ := toolSpanFixture(t)
+
+	tr.Handle(agentruntime.ToolUseEvent{ID: "toolu_big", Name: "Read"})
+	tr.Handle(agentruntime.ToolResultEvent{ID: "toolu_big", Oversized: true})
+
+	spans := endedToolSpans(rec)
+	require.Len(t, spans, 1, "the span ends when the oversized result is received, not at Finish")
+	attrs := toolSpanAttrs(spans[0])
+	assert.Equal(t, "execute_tool Read", spans[0].Name)
+	assert.True(t, attrs["fullsend.tool.result_oversized"].AsBool())
+	assert.NotContains(t, attrs, attribute.Key("error.type"))
+	assert.Equal(t, codes.Unset, spans[0].Status.Code, "the outcome is unknown: neither Ok nor Error")
+	assert.NotContains(t, attrs, attribute.Key("fullsend.tool.unmatched"))
+	assert.Empty(t, tr.open)
+
+	tr.Finish()
+	assert.Len(t, endedToolSpans(rec), 1, "Finish has nothing left to end as unanswered")
+
+	tr.Handle(agentruntime.ToolUseEvent{ID: "toolu_ok", Name: "Read"})
+	tr.Handle(agentruntime.ToolResultEvent{ID: "toolu_ok", Result: "fine"})
+	assert.NotContains(t, toolSpanAttrs(endedToolSpans(rec)[1]), attribute.Key("fullsend.tool.result_oversized"),
+		"a decoded result never carries the marker")
+}
+
+func TestToolSpanTracker_OversizedOrphanResultCarriesBothMarkers(t *testing.T) {
+	tr, rec, _ := toolSpanFixture(t)
+
+	tr.Handle(agentruntime.ToolResultEvent{ID: "toolu_lost", Oversized: true})
+
+	spans := endedToolSpans(rec)
+	require.Len(t, spans, 1)
+	attrs := toolSpanAttrs(spans[0])
+	assert.True(t, attrs["fullsend.tool.unmatched"].AsBool())
+	assert.True(t, attrs["fullsend.tool.result_oversized"].AsBool())
+	assert.NotContains(t, attrs, attribute.Key("error.type"))
+	assert.Equal(t, codes.Unset, spans[0].Status.Code)
+}
+
 func TestToolSpanTracker_EventsWithoutIDProduceNoSpan(t *testing.T) {
 	// pi and codex emit ToolUseEvent without an id and never a result.
 	tr, rec, _ := toolSpanFixture(t)
@@ -242,6 +284,18 @@ func TestToolSpanTracker_OrphanResultsCountTowardTheCap(t *testing.T) {
 
 	assert.Equal(t, 0, tr.Finish(), "results with no open span past the cap are not charged")
 	assert.Len(t, endedToolSpans(rec), maxToolSpansPerIteration, "one orphan fits, two do not")
+}
+
+func TestToolSpanTracker_OversizedOrphanResultsCountTowardTheCap(t *testing.T) {
+	tr, rec, _ := toolSpanFixture(t)
+	for i := 0; i < maxToolSpansPerIteration-1; i++ {
+		tr.Handle(agentruntime.ToolUseEvent{ID: fmt.Sprintf("toolu_%05d", i), Name: "Bash"})
+	}
+	for i := 0; i < 3; i++ {
+		tr.Handle(agentruntime.ToolResultEvent{ID: fmt.Sprintf("orphan_%d", i), Oversized: true})
+	}
+	assert.Equal(t, 0, tr.Finish())
+	assert.Len(t, endedToolSpans(rec), maxToolSpansPerIteration, "one oversized orphan fits, two do not")
 }
 
 func TestToolSpanTracker_NameIsRedactedAndBounded(t *testing.T) {

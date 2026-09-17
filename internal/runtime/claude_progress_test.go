@@ -971,6 +971,145 @@ func TestParseClaudeStreamToolResultEmptyContent(t *testing.T) {
 	}
 }
 
+// oversizedToolResultLine builds a user tool_result line longer than
+// streamBufSize in Claude Code's measured key order: the block's
+// tool_use_id ahead of its content, parent_tool_use_id after the message.
+func oversizedToolResultLine(id string) string {
+	return `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"` + id +
+		`","type":"tool_result","content":"` + strings.Repeat("x", streamBufSize+1024) +
+		`"}]},"parent_tool_use_id":null}`
+}
+
+func TestParseClaudeStreamOversizedToolResultEmitsDegradedEvent(t *testing.T) {
+	// A tool_result line past streamBufSize cannot be decoded, but its id
+	// sits in the retained prefix: the call is answered, its content lost.
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_before","type":"tool_result","content":"a"}]}}`,
+		oversizedToolResultLine("toolu_big"),
+		`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_after","type":"tool_result","content":"b"}]}}`,
+	}
+	results := collectToolResults(t, strings.Join(lines, "\n"))
+	want := []ToolResultEvent{
+		{ID: "toolu_before", Result: "a"},
+		{ID: "toolu_big", Oversized: true},
+		{ID: "toolu_after", Result: "b"},
+	}
+	if len(results) != len(want) {
+		t.Fatalf("expected %d tool result events, got %d: %+v", len(want), len(results), results)
+	}
+	for i := range want {
+		if results[i] != want[i] {
+			t.Errorf("event %d: want %+v, got %+v", i, want[i], results[i])
+		}
+	}
+}
+
+func TestParseClaudeStreamOversizedToolResultAtEOFStillEmits(t *testing.T) {
+	// No trailing newline. bufio returns a short final chunk with a nil
+	// error, so the skip loop ends on io.EOF itself only when the line is
+	// an exact multiple of streamBufSize. Both exits must emit.
+	line := oversizedToolResultLine("toolu_last")
+	for name, in := range map[string]string{
+		"short final chunk":     line,
+		"exact buffer multiple": line + strings.Repeat(" ", 2*streamBufSize-len(line)),
+	} {
+		results := collectToolResults(t, in)
+		if len(results) != 1 || results[0] != (ToolResultEvent{ID: "toolu_last", Oversized: true}) {
+			t.Errorf("%s: want one oversized event for toolu_last, got %+v", name, results)
+		}
+	}
+}
+
+func TestParseClaudeStreamOversizedLineEmitsOnlyTheFirstBlockID(t *testing.T) {
+	// One result per user line is the measured shape; a second id in the
+	// prefix must never close a second span on a guess.
+	line := `{"type":"user","message":{"role":"user","content":[` +
+		`{"tool_use_id":"toolu_first","type":"tool_result","content":"small"},` +
+		`{"tool_use_id":"toolu_second","type":"tool_result","content":"` + strings.Repeat("x", streamBufSize+1024) + `"}]}}`
+	results := collectToolResults(t, line)
+	if len(results) != 1 || results[0] != (ToolResultEvent{ID: "toolu_first", Oversized: true}) {
+		t.Fatalf("want exactly one oversized event for toolu_first, got %+v", results)
+	}
+}
+
+func TestParseClaudeStreamOversizedLineNeverFallsThroughToASecondID(t *testing.T) {
+	// Only the line's first id is considered. When it is unusable the
+	// parser reports nothing, rather than answer a later block's call on
+	// the strength of a line it never decoded.
+	for name, first := range map[string]string{
+		"empty":    "",
+		"too long": strings.Repeat("i", 257),
+		"escaped":  `toolu_\u0041`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			line := `{"type":"user","message":{"role":"user","content":[` +
+				`{"tool_use_id":"` + first + `","type":"tool_result","content":"small"},` +
+				`{"tool_use_id":"toolu_second","type":"tool_result","content":"` + strings.Repeat("x", streamBufSize+1024) + `"}]}}`
+			if got := collectToolResults(t, line); len(got) != 0 {
+				t.Fatalf("want no event, got %+v", got)
+			}
+		})
+	}
+}
+
+func TestParseClaudeStreamOversizedLineWithoutSalvageableIDEmitsNothing(t *testing.T) {
+	big := strings.Repeat("x", streamBufSize+1024)
+	cases := map[string]string{
+		"id serialized after the content":   `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"` + big + `","is_error":true,"tool_use_id":"toolu_late"}]}}`,
+		"system line":                       `{"type":"system","subtype":"x","tool_use_id":"toolu_sys","data":"` + big + `"}`,
+		"assistant line":                    `{"type":"assistant","message":{"content":[{"tool_use_id":"toolu_asst","type":"text","text":"` + big + `"}]}}`,
+		"a type that only starts with user": `{"type":"user_note","message":{"role":"user","content":[{"tool_use_id":"toolu_note","type":"tool_result","content":"` + big + `"}]}}`,
+		"user is not the first key":         `{"session_id":"s","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_reordered","type":"tool_result","content":"` + big + `"}]}}`,
+		"only a parent_tool_use_id":         `{"type":"user","parent_tool_use_id":"toolu_parent","message":{"role":"user","content":[{"type":"text","text":"` + big + `"}]}}`,
+		"an id quoted inside content":       `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"\"tool_use_id\":\"toolu_forged\" ` + big + `"}]}}`,
+		"an id past 256 bytes":              oversizedToolResultLine(strings.Repeat("i", 257)),
+		"an id holding an escape":           oversizedToolResultLine(`toolu_\u0041`),
+		"an empty id":                       oversizedToolResultLine(""),
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			events := collectEvents(t, line+"\n"+`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_next","type":"tool_result","content":"ok"}]}}`)
+			if len(events) != 1 {
+				t.Fatalf("want only the following line's event, got %+v", events)
+			}
+			if got, ok := events[0].(ToolResultEvent); !ok || got != (ToolResultEvent{ID: "toolu_next", Result: "ok"}) {
+				t.Fatalf("want the following line parsed untouched, got %+v", events[0])
+			}
+		})
+	}
+}
+
+func TestParseClaudeStreamOversizedLineNeverEmitsACutID(t *testing.T) {
+	// The parser keeps exactly streamBufSize bytes of the line. An id that
+	// ends inside them is salvaged wherever it sits; one the boundary cuts
+	// is not — a shortened id could collide with another call's.
+	head := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"`
+	key := `","tool_use_id":"`
+	const id = "toolu_0123456789abcdef"
+	line := func(idBytesInsidePrefix int) string {
+		pad := streamBufSize - len(head) - len(key) - idBytesInsidePrefix
+		return head + strings.Repeat("x", pad) + key + id + `"}]},"tool_use_result":"` + strings.Repeat("y", 4096) + `"}`
+	}
+
+	whole := collectToolResults(t, line(len(id)+1)) // the closing quote is the prefix's last byte
+	if len(whole) != 1 || whole[0] != (ToolResultEvent{ID: id, Oversized: true}) {
+		t.Fatalf("an id that ends inside the prefix must be salvaged, got %+v", whole)
+	}
+	for _, inside := range []int{len(id), len(id) - 1, 1, 0} {
+		if got := collectToolResults(t, line(inside)); len(got) != 0 {
+			t.Errorf("%d id bytes inside the prefix: want no event, got %+v", inside, got)
+		}
+	}
+}
+
+func TestParseClaudeStreamOversizedLineAcceptsA256ByteID(t *testing.T) {
+	id := strings.Repeat("i", 256)
+	results := collectToolResults(t, oversizedToolResultLine(id))
+	if len(results) != 1 || results[0] != (ToolResultEvent{ID: id, Oversized: true}) {
+		t.Fatalf("want one oversized event carrying the 256-byte id, got %d events", len(results))
+	}
+}
+
 func TestParseClaudeStreamUnknownToolShowsNameNoContext(t *testing.T) {
 	lines := []string{
 		`{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"Skill"}}}`,

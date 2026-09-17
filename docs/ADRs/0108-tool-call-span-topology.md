@@ -71,8 +71,10 @@ time. Attributes follow semconv v1.37.0:
 `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`,
 `gen_ai.tool.call.id`; a result flagged `is_error` sets
 `error.type=tool_error` and status Error. Calls that never get a result
-close as `error.type=unanswered`, results for calls never reported are
-marked `fullsend.tool.unmatched`, and events without a call id (pi, codex,
+close as `error.type=unanswered`, a result whose stream line was too long
+to decode ends its span marked `fullsend.tool.result_oversized` with no
+status (the tool answered; its outcome is unknown), results for calls never
+reported are marked `fullsend.tool.unmatched`, and events without a call id (pi, codex,
 server-side tools) get no span — the edge cases are specified in the [dev
 guide](../guides/dev/tracing.md#execute_tool-spans). Names and call ids pass
 through the same sanitizer as span content — names bounded, ids dropped on
@@ -104,7 +106,7 @@ convention bump.
 - Sub-agent calls are flat children of the `agent` span; nesting them under
   the dispatching `Agent` call is a small follow-up now that the parent span
   exists while its children run (ADR 0050's deferred item 1 stays deferred).
-- `execute_tool` spans are Claude-only until the pi and codex parsers pass
-  their streams' call ids through.
+- `execute_tool` spans are Claude-only until the pi and codex parsers emit
+  call ids and results ([#7414](https://github.com/fullsend-ai/fullsend/issues/7414)).
 - This settles the span-granularity question in #294; retention and access
   remain open there.

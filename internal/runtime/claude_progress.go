@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -193,12 +195,23 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 			return err
 		}
 		if isPrefix {
-			// Lines beyond streamBufSize are skipped whole. For user
-			// lines this loses any tool_result they carry (e.g. results
-			// holding base64 image blocks) — the event is never emitted
-			// and content capture cannot mark the loss.
+			// A line beyond streamBufSize is never decoded: the stream is
+			// written inside the sandbox, and the bound keeps one line from
+			// growing the runner's memory without limit. The skip is whole,
+			// but for a tool_result line it is not silent — the retained
+			// prefix carries the call id, so the result is reported as
+			// answered with its content lost (ToolResultEvent.Oversized).
+			// Text alone can trip the bound, not only base64 image blocks:
+			// Claude Code can repeat a result in a trailing tool_use_result
+			// key (close to half the line on the largest captured ones), so
+			// about half a MiB of output is enough. Raising the bound means
+			// raising streamBufSize, which every stream parser shares.
+			lostID := oversizedToolResultID(line)
 			for isPrefix && err == nil {
 				_, isPrefix, err = br.ReadLine()
+			}
+			if lostID != "" {
+				onEvent(ToolResultEvent{ID: lostID, Oversized: true})
 			}
 			continue
 		}
@@ -445,6 +458,40 @@ func parseClaudeStream(r io.Reader, onEvent func(AgentEvent)) error {
 			}
 		}
 	}
+}
+
+// toolUseIDKey opens a tool_result block's id as Claude Code serializes
+// it. The leading quote keeps parent_tool_use_id out, and an id copied
+// into a JSON string cannot match: its quotes are escaped there.
+var toolUseIDKey = []byte(`"tool_use_id":"`)
+
+// toolUseIDValueRe matches the id that follows toolUseIDKey: 1 to 256
+// bytes with no escape, closed by its quote — so an id the prefix
+// boundary cut short never matches.
+var toolUseIDValueRe = regexp.MustCompile(`^([^"\\]{1,256})"`)
+
+// oversizedToolResultID salvages the call id from the retained prefix of
+// an over-long stream line, or returns "" when the line is not a user
+// line or its first id is unusable. Only the line's first id is ever
+// considered: one result per user line is the shape Claude Code writes,
+// and answering a later block's call on the strength of a line that was
+// never decoded would end a span whose result may still be on its way.
+// An id serialized after the content lies beyond the prefix and is not
+// recovered; that call stays unanswered. The result is a copy — the
+// prefix dies at the next read.
+func oversizedToolResultID(prefix []byte) string {
+	if !bytes.HasPrefix(prefix, []byte(`{"type":"user"`)) {
+		return ""
+	}
+	i := bytes.Index(prefix, toolUseIDKey)
+	if i < 0 {
+		return ""
+	}
+	m := toolUseIDValueRe.FindSubmatch(prefix[i+len(toolUseIDKey):])
+	if m == nil {
+		return ""
+	}
+	return string(m[1])
 }
 
 // toolResultText flattens a tool_result block's content. The wire

@@ -51,9 +51,13 @@ const maxToolSpanNameBytes = 128
 // arrival trails execution end by the pipe latency. Calls are keyed by id
 // because the stream interleaves several open calls (parallel sub-agent
 // dispatch); a call that never gets a result — the runtime was stopped, or its
-// result line exceeded the parser's 1 MiB cap — is ended by Finish as
-// error.type=unanswered, and a result whose call was never seen (its tool_use
-// line was skipped) becomes a marked span of near-zero duration. Events
+// over-long result line showed no id in the prefix the parser keeps — is ended
+// by Finish as error.type=unanswered; a result whose line exceeded the parser's
+// 1 MiB bound (ToolResultEvent.Oversized) ends its span at receipt, marked
+// fullsend.tool.result_oversized and left without a status, since the tool
+// answered and its is_error was never decoded; and a result whose call was
+// never seen (its tool_use line was skipped) becomes a marked span of
+// near-zero duration. Events
 // without an id — pi and codex emit none, and server-side tools get none
 // because their result never arrives as a tool_result — produce no span. The
 // name and the call id go through the same output pipeline as span content
@@ -114,6 +118,13 @@ func (t *toolSpanTracker) Handle(evt agentruntime.AgentEvent) {
 			t.created++
 			span = t.start(id, "")
 			span.SetAttributes(attribute.Bool("fullsend.tool.unmatched", true))
+		}
+		if e.Oversized {
+			// The parser dropped the line, not the tool: no error.type, and
+			// no Ok either — is_error lay beyond the prefix the parser kept.
+			span.SetAttributes(attribute.Bool("fullsend.tool.result_oversized", true))
+			span.End()
+			return
 		}
 		finalizeToolSpan(span, e.IsError)
 	}

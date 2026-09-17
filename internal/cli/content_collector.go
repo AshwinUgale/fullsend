@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"sort"
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -14,12 +15,37 @@ import (
 
 // maxContentBytes bounds the conversation content attached to one agent
 // span (one iteration), measured on the raw part bytes before JSON
-// encoding — the marshaled attribute additionally carries per-part JSON
-// syntax and escaping, so a budget-binding iteration serializes larger
-// than this value. A 255KB attribute was accepted whole by the pilot
-// backend in live validation; beyond that is unproven, so the total
-// stays put and tool results are bounded per part instead.
+// encoding; maxEncodedContentBytes bounds what those bytes encode to.
+//
+// No measurement requires this value. It predates the only acceptance
+// proof there is: one 255,082-byte attribute, accepted whole by the pilot
+// MLflow backend on 2026-08-20. Nothing larger was ever sent, so the
+// backend's real ceiling is unknown. Nothing on the runner is in the way:
+// the SDK's attribute cap is lifted under the content gate, the exporter
+// is OTLP over HTTP with no message limit of its own, and the file sink
+// has none. What keeps the value is the cost of guessing wrong: a backend
+// that refuses an oversized request refuses the whole OTLP batch — up to
+// 512 spans, Level 1 metadata included — and the exporter does not retry
+// a refusal.
+//
+// To raise it, prove the size first: send attributes of increasing size
+// to the target backend and read each back whole, then move this constant
+// and maxEncodedContentBytes together. Raise this total before
+// maxToolResultBytes — on live streams the total is what evicts results,
+// and a larger per-result cap alone evicts more of them. The measurements
+// and the procedure are in docs/guides/infrastructure/distributed-tracing.md
+// ("Size limits").
 const maxContentBytes = 256 * 1024
+
+// maxEncodedContentBytes bounds gen_ai.output.messages as exported — the
+// JSON string the backend receives, syntax and escaping included. It sits
+// just under the one size the pilot backend is proven to accept (see
+// maxContentBytes), so no record is ever larger than the proof. The raw
+// budget runs first; on live streams a budget-binding record encodes 9 to
+// 11% larger than its raw bytes, and escape-dense content ('<', control
+// bytes, invalid UTF-8) up to six times larger, so Result trims the
+// oldest content again until the encoding fits.
+const maxEncodedContentBytes = 255_000
 
 // maxToolIDBytes bounds a tool call/result id. The stream decodes ids
 // unbounded and Level 3 lifts the SDK attribute cap; real ids run tens
@@ -30,19 +56,21 @@ const maxContentBytes = 256 * 1024
 const maxToolIDBytes = 256
 
 // maxToolResultBytes bounds one tool result's response within the
-// suffix budget. Measured on three real review-agent MAIN-THREAD
-// transcripts (2026-08-25): uncapped results total 222-389KB per
-// iteration — overflowing maxContentBytes on two of three runs — while
+// suffix budget. It exists only because the total above is small: what
+// blocks raising or removing it is the unproven backend ceiling named on
+// maxContentBytes, nothing about the results themselves. Measured on
+// three real review-agent MAIN-THREAD transcripts (2026-08-25): uncapped,
+// the collector's total is 222-389KB per iteration (results alone
+// 194-357KB) — overflowing maxContentBytes on two of three runs — while
 // an 8KiB cap kept those runs at 127-255KB with 78-89% of results
 // untouched (p50 2-3.5KB, p90 9-19KB). The live stream this collector
-// consumes also interleaves sub-agent results, so those figures are a
-// lower bound on production volume and the eviction-pressure reduction
-// is a lower-bound claim. The cap lowers eviction pressure; it does
-// not prevent it — a heavier iteration still overflows the total
-// budget and evicts oldest-first, marked via the truncated and
-// dropped-bytes attributes. A capped response keeps its tail, extending
-// the budget's ordered-suffix policy to individual results; no consumer
-// requirement has confirmed either direction yet.
+// consumes also interleaves sub-agent results (117-255 results per
+// iteration against 35-58 on the main thread), so the cap lowers
+// eviction pressure; it does not prevent it — those streams still
+// overflow the total budget and evict oldest-first, marked via the
+// truncated and dropped-bytes attributes. A capped response keeps its
+// tail, extending the budget's ordered-suffix policy to individual
+// results; no consumer requirement has confirmed either direction yet.
 const maxToolResultBytes = 8 * 1024
 
 // newContentCollectorIfEnabled returns a live collector when the Level 3
@@ -113,8 +141,9 @@ type contentPart struct {
 	// content-bearing (an errored empty result is signal, not absence)
 	// and accounts a fixed footprint. Truncated marks a part whose bulk
 	// field was cut, so a consumer never reads a fragment as a whole
-	// result; it is set only by the collector's own cuts and stays
-	// outside the accounting.
+	// result; it is set by the collector's own cuts and by parser-side
+	// loss (Partial, Oversized), and stays outside the accounting except
+	// for an oversized stand-in's fixed footprint (see oversized).
 	IsError   bool `json:"is_error,omitempty"`
 	Truncated bool `json:"fullsend.truncated,omitempty"`
 	// bulkScanned records that the bulk field was already redacted at
@@ -122,11 +151,21 @@ type contentPart struct {
 	// those bytes again — a re-scan can re-match masked values and
 	// double-count findings.
 	bulkScanned bool
+	// oversized records that the parser skipped the result's stream line
+	// whole (ToolResultEvent.Oversized). The marked, empty part is the
+	// record's only trace of that result, so — like an errored-empty part
+	// — it is content-bearing and accounts a fixed footprint.
+	oversized bool
 }
 
 // isErrorFootprint is the serialized cost of `"is_error":true,` — the
 // bytes an errored-empty part contributes to the attribute.
 const isErrorFootprint = 16
+
+// truncatedFootprint is the serialized cost of
+// `"fullsend.truncated":true,` — the bytes an oversized result's empty
+// part contributes to the attribute.
+const truncatedFootprint = 26
 
 // MarshalJSON emits the schema-REQUIRED response key on
 // tool_call_response parts even when the response is empty; omitempty
@@ -153,6 +192,9 @@ func contentBytes(p contentPart) int {
 	if p.IsError {
 		n += isErrorFootprint
 	}
+	if p.oversized {
+		n += truncatedFootprint
+	}
 	return n
 }
 
@@ -160,7 +202,7 @@ func contentBytes(p contentPart) int {
 // id bytes, since the id serializes into the attribute like everything
 // else. JSON syntax and escaping added at marshal time remain uncounted
 // — the budget is measured on raw part bytes, as documented on
-// maxContentBytes.
+// maxContentBytes; maxEncodedContentBytes bounds the encoding.
 func partSize(p contentPart) int {
 	return contentBytes(p) + len(p.ID)
 }
@@ -229,9 +271,11 @@ type contentResult struct {
 // afterwards.
 type contentCollector struct {
 	maxBytes int
-	pipeline *security.Pipeline
-	parts    []contentPart
-	total    int
+	// maxEncoded bounds the marshaled attribute; see maxEncodedContentBytes.
+	maxEncoded int
+	pipeline   *security.Pipeline
+	parts      []contentPart
+	total      int
 	// evicted counts bytes of old parts discarded during accumulation.
 	// Eviction keeps memory bounded on long sessions by approximating the
 	// Result budget on sizes as accumulated — pre-redaction — so it can
@@ -246,7 +290,7 @@ type contentCollector struct {
 }
 
 func newContentCollector(maxBytes int) *contentCollector {
-	return &contentCollector{maxBytes: maxBytes, pipeline: security.OutputPipeline()}
+	return &contentCollector{maxBytes: maxBytes, maxEncoded: maxEncodedContentBytes, pipeline: security.OutputPipeline()}
 }
 
 // Handle consumes one normalized event. Contiguous text and reasoning
@@ -265,11 +309,17 @@ func (c *contentCollector) Handle(evt agentruntime.AgentEvent) {
 	case agentruntime.ToolUseEvent:
 		c.appendPart(contentPart{Type: "tool_call", ID: boundedID(e.ID), Name: e.Name, Summary: e.Summary})
 	case agentruntime.ToolResultEvent:
-		p := contentPart{Type: "tool_call_response", ID: boundedID(e.ID), Response: e.Result, IsError: e.IsError}
+		p := contentPart{Type: "tool_call_response", ID: boundedID(e.ID), Response: e.Result, IsError: e.IsError, oversized: e.Oversized}
 		// A parser-side partial flatten (non-text blocks skipped) is a
 		// cut like any other: the part must not read as a whole result.
-		p.Truncated = e.Partial
+		// So is a result whose whole line the parser skipped: it is kept
+		// empty and marked, never dropped as if the call had no answer.
+		p.Truncated = e.Partial || e.Oversized
 		if len(p.Response) > maxToolResultBytes {
+			// The per-result cut a consumer sees: the tail is kept and the
+			// part marked fullsend.truncated. What stops this cap from being
+			// raised is named on maxToolResultBytes and maxContentBytes.
+			//
 			// Redact before the cap cut — the same invariant as every
 			// other cut: trimming raw bytes first could split a secret at
 			// the boundary past recognition. Redaction alone can shrink
@@ -478,13 +528,76 @@ func (c *contentCollector) Result(finishReason string) contentResult {
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
-	raw, err := json.Marshal([]contentMessage{{Role: "assistant", Parts: kept, FinishReason: finishReason}})
+	raw, err := marshalOutput(kept, finishReason)
+	if over := len(raw) - c.maxEncoded; err == nil && over > 0 {
+		// The budget above counted raw bytes; JSON syntax and escaping
+		// come on top, so the encoded record can still pass the ceiling.
+		// Parts are already redacted here, so cutting them is safe.
+		kept = shrinkEncoded(kept, over, &res)
+		if len(kept) == 0 {
+			return res
+		}
+		raw, err = marshalOutput(kept, finishReason)
+	}
 	if err != nil {
 		// Strings marshal unconditionally; treat the impossible as no content.
 		return res
 	}
 	res.OutputMessages = string(raw)
 	return res
+}
+
+func marshalOutput(parts []contentPart, finishReason string) ([]byte, error) {
+	return json.Marshal([]contentMessage{{Role: "assistant", Parts: parts, FinishReason: finishReason}})
+}
+
+// shrinkEncoded makes the marshaled record at least over bytes shorter,
+// the way the raw budget does: oldest first, a suffix kept. Each leading
+// part is tail-cut to exactly what is owed if its bulk field can pay, and
+// dropped whole otherwise — a tool_call always, since it has no bulk
+// field (see bulkField). Sizes are measured on the encoding itself, so
+// the result fits for any escaping; DroppedBytes is still charged in raw
+// bytes, like every other cut.
+func shrinkEncoded(kept []contentPart, over int, res *contentResult) []contentPart {
+	res.Truncated = true
+	for len(kept) > 0 && over > 0 {
+		p := &kept[0]
+		bulk := bulkField(p)
+		// The cut adds the part's truncated marker, unless the part already
+		// carries one (a capped or partial result); reserve it only then.
+		reserve := truncatedFootprint
+		if p.Truncated {
+			reserve = 0
+		}
+		if tail := encodedTail(*bulk, encodedLen(*bulk)-over-reserve); tail != "" {
+			res.DroppedBytes += len(*bulk) - len(tail)
+			*bulk = tail
+			p.Truncated = true
+			return kept
+		}
+		enc, _ := json.Marshal(*p)
+		res.DroppedBytes += partSize(*p)
+		over -= len(enc) + 1 // the part and its separating comma
+		kept = kept[1:]
+	}
+	return kept
+}
+
+// encodedLen is the length of s as the body of a JSON string.
+func encodedLen(s string) int {
+	enc, _ := json.Marshal(s)
+	return len(enc) - 2
+}
+
+// encodedTail returns the longest tail of s, starting on a rune boundary,
+// whose JSON encoding is at most allow bytes; "" when none fits. Runes
+// encode independently, so a tail's encoded length only falls as its
+// start moves right, which is what the binary search needs.
+func encodedTail(s string, allow int) string {
+	start := sort.Search(len(s), func(i int) bool {
+		return encodedLen(tailToRuneBoundary(s, len(s)-i)) <= allow
+	})
+	return tailToRuneBoundary(s, len(s)-start)
 }
 
 // redact runs text through the output pipeline, returning the sanitized
