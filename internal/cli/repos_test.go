@@ -2085,6 +2085,32 @@ func assertGitLabInitMRComplete(t *testing.T, fc *forge.FakeClient) {
 	}
 }
 
+// captureStdout runs f with os.Stdout redirected to a pipe and returns
+// everything written to it. Used to observe printer.StepStart/StepWarn
+// output from code paths (like runReposInstall) that write directly to
+// os.Stdout rather than an injectable writer.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		defer close(done)
+		_, _ = buf.ReadFrom(r)
+	}()
+
+	f()
+
+	require.NoError(t, w.Close())
+	os.Stdout = old
+	<-done
+	return buf.String()
+}
+
 // TestRunReposInstall_GitLabRerunBeforeInitMergeReusesInitMR reproduces
 // #7417: two consecutive installs without merging between them must keep
 // a single complete initialization MR instead of opening a bump MR.
@@ -2110,8 +2136,14 @@ gitlab:
 		DefaultBranch: "main",
 	}}
 
-	_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	firstOutput := captureStdout(t, func() {
+		_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	})
 	assertGitLabInitMRComplete(t, fc)
+	// First run: nothing existed before it, so GitLab post-install (bot
+	// token + pipeline schedule setup) must be attempted.
+	assert.Contains(t, firstOutput, "GitLab post-install setup",
+		"first install should attempt GitLab post-install setup")
 
 	firstCommitCount := len(fc.CommittedFilesToBranch)
 
@@ -2122,8 +2154,18 @@ gitlab:
 		delete(fc.FileContents, path)
 	}
 
-	_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	secondOutput := captureStdout(t, func() {
+		_ = runReposInstall(context.Background(), gitlabInstallOpts(manifestPath, fc))
+	})
 	assertGitLabInitMRComplete(t, fc)
+	// Second run: variables/secrets/bot token already exist from the
+	// first run even though the workflow (and thus Installed) still
+	// reads as a fresh install. Re-running post-install would revoke and
+	// recreate the live fullsend-bot PAT and pipeline schedules — it
+	// must be skipped this time (#7417 follow-up: credential rotation on
+	// every re-run while the init MR is open).
+	assert.NotContains(t, secondOutput, "GitLab post-install setup",
+		"second install must not re-run GitLab post-install setup while the init MR is still open")
 
 	// FakeClient.CreateChangeProposal always records a new proposal, so
 	// the assertion is on branch identity: both runs must target the

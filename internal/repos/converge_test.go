@@ -758,6 +758,16 @@ func TestConverge_PartialSecretState(t *testing.T) {
 	if !fc.Secrets["acme/api/FULLSEND_GCP_WIF_PROVIDER"] {
 		t.Error("expected Install to write missing FULLSEND_GCP_WIF_PROVIDER secret")
 	}
+	// The already-present secret must be left untouched: overwriting it
+	// (e.g. because ReuseSecrets is all-or-nothing) could silently
+	// retarget an already-written GCP secret binding to a different
+	// --inference-project or resolved WIF provider on a partial-state
+	// re-run.
+	for _, rec := range fc.CreatedSecrets {
+		if rec.Owner == "acme" && rec.Repo == "api" && rec.Name == "FULLSEND_GCP_PROJECT_ID" {
+			t.Error("expected already-present FULLSEND_GCP_PROJECT_ID secret to be left untouched, but Install rewrote it")
+		}
+	}
 }
 
 func TestConverge_VariableDriftWithScaffoldMatch(t *testing.T) {
@@ -3777,6 +3787,9 @@ func TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath(t *testing.T
 	if len(result.Installed()) != 1 {
 		t.Fatalf("first Converge() expected 1 installed, got %d", len(result.Installed()))
 	}
+	if !result.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("first Converge() expected NeedsGitLabPostInstall=true: nothing existed before this run, so bot token/schedule setup must run")
+	}
 	sc.mu.Lock()
 	firstFiles := append([]forge.TreeFile(nil), sc.files...)
 	firstInstalled := append([]bool(nil), sc.installed...)
@@ -3803,6 +3816,14 @@ func TestConverge_GitLab_RerunBeforeInitMergeReusesFreshInstallPath(t *testing.T
 	if len(result2.Installed()) != 1 {
 		t.Fatalf("second Converge() expected 1 installed (still no workflow on default branch), got installed=%d converged=%d current=%d",
 			len(result2.Installed()), len(result2.Converged()), len(result2.AlreadyCurrent()))
+	}
+	// #7417's re-run scenario: variables/secrets/bot token already exist
+	// from the first run. Installed stays true (workflow still absent),
+	// but re-running GitLab post-install (bot token + schedule setup)
+	// would revoke and recreate the live fullsend-bot PAT and pipeline
+	// schedules — it must not run a second time.
+	if result2.Installed()[0].NeedsGitLabPostInstall {
+		t.Error("second Converge() expected NeedsGitLabPostInstall=false: components already existed from the first run, so bot token/schedule setup must not re-run")
 	}
 	sc2.mu.Lock()
 	secondFiles := append([]forge.TreeFile(nil), sc2.files...)

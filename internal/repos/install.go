@@ -96,6 +96,17 @@ type InstallConfig struct {
 	// empty and secret writes are skipped.
 	ReuseSecrets bool
 
+	// ExistingSecrets lists the repo secret names (e.g.
+	// FULLSEND_GCP_PROJECT_ID) already confirmed present on the repo
+	// before this install runs. Install skips writing any secret named
+	// here individually, so an already-present secret is left untouched
+	// even when ReuseSecrets is false because only some of the required
+	// secrets exist yet (a partial-secret, workflow-missing re-install —
+	// see convergeRepo). ReuseSecrets remains the all-or-nothing signal
+	// used for the WIF-provider validation and progress messaging when
+	// every required secret already exists.
+	ExistingSecrets []string
+
 	// PrebuiltScaffoldFiles, when non-nil, replaces the embedded scaffold
 	// template collection. Used when fullsend_ref pins to a version that
 	// differs from the running binary, so templates are fetched from the
@@ -260,18 +271,34 @@ func Install(ctx context.Context, cfg InstallConfig,
 		}
 	}
 
-	// Step 6: Write repository secrets. Skipped when reusing existing secrets.
+	// Step 6: Write repository secrets. Skipped entirely when reusing all
+	// existing secrets; otherwise each secret already present (per
+	// ExistingSecrets) is left untouched and only the missing ones are
+	// written, so a partial secret state does not get an already-written
+	// secret silently retargeted (e.g. by a re-run with a different
+	// --inference-project or resolved WIF provider).
 	repoSecrets := installSecretsForForge(cfg, wifProvider)
 	if cfg.ReuseSecrets {
 		progress(repoFullName, "secrets", "Reusing existing repository secrets")
 	} else if len(repoSecrets) > 0 {
+		existing := make(map[string]bool, len(cfg.ExistingSecrets))
+		for _, name := range cfg.ExistingSecrets {
+			existing[name] = true
+		}
 		progress(repoFullName, "secrets", "Configuring repository secrets")
+		written := 0
 		for _, name := range maputil.SortedKeys(repoSecrets) {
+			if existing[name] {
+				continue
+			}
 			if err := client.CreateRepoSecret(ctx, cfg.Owner, cfg.Repo, name, repoSecrets[name]); err != nil {
 				return result, fmt.Errorf("setting repo secret %s: %w", name, err)
 			}
+			written++
 		}
-		progress(repoFullName, "secrets", fmt.Sprintf("Set %d repository secrets", len(repoSecrets)))
+		if written > 0 {
+			progress(repoFullName, "secrets", fmt.Sprintf("Set %d repository secrets", written))
+		}
 	}
 
 	// Step 7: Commit scaffold files via the caller-provided commit function.

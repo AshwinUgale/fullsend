@@ -911,13 +911,19 @@ func runReposInstall(ctx context.Context, opts *reposInstallConfig) error {
 	}
 
 	// GitLab post-install: set up bot token and pipeline schedules for
-	// newly installed GitLab repos. Only fresh installs need this —
-	// converged repos already have working bot tokens and schedules.
-	// Running on converged repos would revoke live bot PATs, breaking
-	// in-flight pipelines.
+	// genuinely new GitLab repos. This is gated on NeedsGitLabPostInstall,
+	// not just Installed — a repo re-run while its initialization MR is
+	// still open (#7417) keeps Installed true (the shim workflow is still
+	// absent from the default branch) even though variables/secrets/bot
+	// token already exist from the prior run. Running bot-token/schedule
+	// setup again would revoke and recreate the live fullsend-bot PAT and
+	// pipeline schedules, breaking in-flight pipelines.
 	var installedPostFail int
 	if !opts.dryRun && len(installed) > 0 {
 		for _, r := range installed {
+			if !r.NeedsGitLabPostInstall {
+				continue
+			}
 			rc, ok := manifest.ResolveConfigWithGlobs(r.Owner, r.Repo)
 			if !ok || rc.Forge != repos.ForgeGitLab {
 				continue

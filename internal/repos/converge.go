@@ -81,6 +81,19 @@ type ConvergeResult struct {
 	// received a full install.
 	Installed bool
 
+	// NeedsGitLabPostInstall is true when Installed is true and no
+	// fullsend-managed component (variables, secrets, etc.) existed on
+	// the repo before this run. GitLab post-install (bot token +
+	// pipeline schedule setup) is destructive — it revokes and
+	// recreates the live fullsend-bot project access token and deletes
+	// and recreates pipeline schedules — so it must run only on a
+	// genuinely first-time install. Re-running install while the
+	// initialization MR is still open (#7417) keeps Installed true
+	// (workflow file still absent) but must not re-trigger this
+	// destructive setup when secrets/variables already exist from the
+	// prior run.
+	NeedsGitLabPostInstall bool
+
 	// Converged is true when the repo had drifted components that were
 	// repaired (variables, refs, or missing scaffold files).
 	Converged bool
@@ -175,6 +188,21 @@ func hasComponent(components []ComponentStatus, name string) bool {
 func secretsPresent(components []ComponentStatus) bool {
 	return hasComponent(components, "secret:"+forge.SecretGCPProjectID) &&
 		hasComponent(components, "secret:"+forge.SecretGCPWIFProvider)
+}
+
+// existingSecretNames returns the drift field names (e.g.
+// "FULLSEND_GCP_PROJECT_ID") of secret components already present on the
+// repo. Install uses this to skip rewriting individual secrets that
+// already exist, even when hasSecrets/ReuseSecrets is false because only
+// some of the required secrets are present yet.
+func existingSecretNames(components []ComponentStatus) []string {
+	var names []string
+	for _, c := range components {
+		if strings.HasPrefix(c.Name, "secret:") && c.Present {
+			names = append(names, DriftFieldName(c.Name))
+		}
+	}
+	return names
 }
 
 // anyComponentPresent returns true when at least one probed component exists.
@@ -507,6 +535,14 @@ func convergeRepo(ctx context.Context,
 	// upgrade path selects a version-specific bump branch and leaves
 	// the original MR incomplete (#7417).
 	isNew := !workflowPresent(d.components)
+	// Snapshot "nothing existed before this run" ahead of Install(),
+	// which is about to write variables/secrets — anyComponentPresent
+	// on d.components (probed during discovery, before any writes)
+	// reflects the pre-run state. Destructive GitLab post-install setup
+	// (bot token + pipeline schedule recreation) must gate on this, not
+	// on isNew/Installed alone, so it does not re-run on every
+	// re-install while the initialization MR is still open (#7417).
+	needsPostInstall := !anyComponentPresent(d.components)
 
 	// Case 1: Workflow not on the default branch — full install via
 	// Install(), which always uses fresh-install PR metadata.
@@ -515,6 +551,7 @@ func convergeRepo(ctx context.Context,
 
 		if cfg.DryRun {
 			cr.Installed = true
+			cr.NeedsGitLabPostInstall = needsPostInstall
 			cr.Actions = append(cr.Actions, ComponentAction{
 				Component: "all",
 				Action:    "add",
@@ -552,6 +589,7 @@ func convergeRepo(ctx context.Context,
 			Runtime:           resolved.Runtime,
 			Direct:            cfg.Direct,
 			ReuseSecrets:      hasSecrets,
+			ExistingSecrets:   existingSecretNames(d.components),
 			VendorBinary:      vendor,
 		}
 
@@ -582,6 +620,7 @@ func convergeRepo(ctx context.Context,
 		}
 
 		cr.Installed = true
+		cr.NeedsGitLabPostInstall = needsPostInstall
 		cr.WIFProvider = installResult.WIFProvider
 		cr.Actions = append(cr.Actions, ComponentAction{
 			Component: "all",
