@@ -5193,20 +5193,20 @@ var roleTokenVars = map[string][]tokenVar{
 // code agent's budget, so a full-budget run's original token is already
 // expired by post-script time (#7231). GitLab is skipped (no App mint).
 //
-// A remint failure is usually non-fatal: the post-script still runs with
-// the existing token (the runtime-stage token already in the process
-// environment). currentLevel is that token's privilege level. The
-// exception is a harness author who configured the post-script stage at a
-// strictly lower privilege level than currentLevel (e.g. runtime: write,
-// post_script: read): leaving the more-privileged leftover token active
-// for the post-script in that case would be a privilege escalation
-// relative to the explicit configuration, so a remint failure is treated
-// as fatal instead — the returned error is non-nil and the post-script
-// must not run. Only the built-in read/write/admin levels can be ranked
-// (mintcore.PermissionLevelAtLeast); a custom level name outside that set
-// falls back to the non-fatal behavior. The returned cleanup restores
-// process env after the post-script; it is a no-op when remint is
-// skipped, fails non-fatally, or fails fatally.
+// A remint failure is non-fatal only when it is a pure expiry refresh —
+// the configured post-script level matches currentLevel (the privilege
+// level of the token already in the process environment). Whenever the
+// configured post-script level differs from currentLevel at all (e.g.
+// runtime: write, post_script: read — or a custom level name that cannot
+// be ranked against currentLevel), leaving the leftover runtime-stage
+// token active for the post-script would not match what the harness
+// author configured, so a remint failure is treated as fatal instead —
+// the returned error is non-nil and the post-script must not run. This
+// covers custom level names as well as the built-in read/write/admin
+// levels: ranking (mintcore.PermissionLevelAtLeast) is not needed because
+// any mismatch, not just a provable downgrade, is treated as fatal. The
+// returned cleanup restores process env after the post-script; it is a
+// no-op when remint is skipped, fails non-fatally, or fails fatally.
 //
 // ctx is the caller's own run ctx, not yet bounded or decoupled from
 // cancellation — remintAgentTokenForPostScript does that itself (rather
@@ -5231,13 +5231,14 @@ func remintAgentTokenForPostScript(ctx context.Context, h *harness.Harness, mint
 	}
 	_, cleanup, err := mintAgentTokenAtLevel(remintCtx, role, mintURL, forgePlatform, level, printer)
 	if err != nil {
-		if level != currentLevel && mintcore.PermissionLevelAtLeast(currentLevel, level) {
-			// currentLevel outranks the configured post-script level: the
-			// leftover runtime-stage token is more privileged than the
-			// harness author asked for. Fail the run rather than silently
-			// hand the post-script a token it was explicitly not supposed
-			// to have.
-			return func() {}, fmt.Errorf("refreshing agent token for post-script at configured level %q (active level %q is more privileged): %w", level, currentLevel, err)
+		if level != currentLevel {
+			// The configured post-script level differs from the leftover
+			// runtime-stage token's level — not just a provable downgrade,
+			// but any mismatch, including custom level names that cannot
+			// be ranked against currentLevel. Fail the run rather than
+			// silently hand the post-script a token at a level the
+			// harness author did not configure for it.
+			return func() {}, fmt.Errorf("refreshing agent token for post-script at configured level %q (active level %q differs): %w", level, currentLevel, err)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			// Distinct from a genuine mint rejection: the client's own

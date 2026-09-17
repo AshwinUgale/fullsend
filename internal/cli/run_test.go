@@ -6153,12 +6153,14 @@ func TestRemintAgentTokenForPostScript_DowngradeErrorIsFatal(t *testing.T) {
 	cleanup()
 }
 
-// TestRemintAgentTokenForPostScript_UnrankedCustomLevelStaysNonFatal covers
-// a custom privilege level name (neither read, write, nor admin): its
-// relative rank against the active level cannot be determined, so a remint
-// failure must fall back to the existing non-fatal behavior rather than
-// guessing.
-func TestRemintAgentTokenForPostScript_UnrankedCustomLevelStaysNonFatal(t *testing.T) {
+// TestRemintAgentTokenForPostScript_UnrankedCustomLevelMismatchIsFatal
+// covers a custom privilege level name (neither read, write, nor admin):
+// its relative rank against the active level cannot be determined by
+// mintcore.PermissionLevelAtLeast, but the configured post-script level
+// still differs from the active level, so a remint failure must be fatal
+// rather than silently leaving the leftover token active — ranking is not
+// required to detect the mismatch.
+func TestRemintAgentTokenForPostScript_UnrankedCustomLevelMismatchIsFatal(t *testing.T) {
 	origMint := statusMintToken
 	defer func() { statusMintToken = origMint }()
 
@@ -6174,12 +6176,11 @@ func TestRemintAgentTokenForPostScript_UnrankedCustomLevelStaysNonFatal(t *testi
 			harness.PrivilegeStagePostScript: "custom-level",
 		},
 	}
-	var buf bytes.Buffer
-	printer := ui.New(&buf)
+	printer := ui.New(io.Discard)
 
 	cleanup, remintErr := remintAgentTokenForPostScript(context.Background(), h, "https://mint.example.com", "", "write", printer)
-	require.NoError(t, remintErr, "an unranked custom level cannot be proven a downgrade, so it must stay non-fatal")
-	assert.Contains(t, buf.String(), "Failed to refresh agent token for post-script")
+	require.Error(t, remintErr, "a level mismatch must be fatal even when the levels involved cannot be ranked")
+	assert.Contains(t, remintErr.Error(), "mint rejected custom level")
 	cleanup()
 }
 
