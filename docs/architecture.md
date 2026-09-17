@@ -415,6 +415,7 @@ Observability is a cross-cutting concern that touches every other component. Eac
   ([ADR 0098](ADRs/0098-entity-first-harness-evaluation.md)).
 - Distributed tracing: framework-native OpenTelemetry instrumentation with zero-configuration baseline. Every run produces `run-telemetry.jsonl` locally; optional live OTLP export to any compatible backend. W3C trace context propagation links multi-agent pipelines into unified traces. OTEL GenAI semantic conventions enable LLM-aware backends ([ADR 0050](ADRs/0050-distributed-tracing-instrumentation.md)).
 - Eval measurements: the concept of scoring traces ([fail-open](glossary.md#fail-open)). [OTEL primary facts](glossary.md#otel-primary-facts) stay on the run trace (`run-telemetry.jsonl`); [OTEL derived products](glossary.md#otel-derived-products) are the scores (`eval-measurements.jsonl`) ([ADR 0087](ADRs/0087-eval-measurements-online-trace-scoring.md)). See [Eval Measurements](guides/infrastructure/eval-measurements.md). When `OTEL_EXPORTER_OTLP_*` is set, scores also export as `gen_ai.evaluation.result` span events on the same TraceID (same OTLP path as agent traces; fail-open).
+- Tool-call results on the trace: Level 3 content capture records each tool call's result — bounded, redacted, and gated off by default like other captured content — alongside its name and arguments, so post-run analysis and replay can see ignored tool errors and errored-result reuse ([ADR 0107](ADRs/0107-capture-tool-call-results-in-run-trace.md)).
 
 **Open questions:**
 
