@@ -15,8 +15,6 @@ import {
 import { getMarkdownFiles } from "./sidebar";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-<<<<<<< HEAD
-=======
 const docsDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(__dirname, "..", "..");
 
@@ -32,7 +30,6 @@ function gitVersionTags(match: string): string[] {
     .split("\n")
     .filter(Boolean);
 }
->>>>>>> 79c986ce6 (chore(docs): keep latest patch per minor in multi-version builds)
 
 const version =
   JSON.parse(fs.readFileSync(path.resolve(__dirname, "..", "..", "package.json"), "utf-8"))
