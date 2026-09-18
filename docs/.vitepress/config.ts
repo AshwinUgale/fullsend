@@ -1,7 +1,9 @@
 import { defineConfig } from "@lando/vitepress-theme-default-plus/config";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getLatestPatchMatching } from "./mvb-satisfies";
 import {
   DOCS_URL_BASE,
   globalSeoHead,
@@ -13,6 +15,24 @@ import {
 import { getMarkdownFiles } from "./sidebar";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+<<<<<<< HEAD
+=======
+const docsDir = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(__dirname, "..", "..");
+
+/** Git glob passed to `git tag --list` and to mvb `multiVersionBuild.match`. */
+const MVB_TAG_MATCH = "v[0-9].*";
+
+/** Git tags mvb will later re-test with `semver.satisfies` (one version at a time). */
+function gitVersionTags(match: string): string[] {
+  return execFileSync("git", ["tag", "--list", match], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  })
+    .split("\n")
+    .filter(Boolean);
+}
+>>>>>>> 79c986ce6 (chore(docs): keep latest patch per minor in multi-version builds)
 
 const version =
   JSON.parse(fs.readFileSync(path.resolve(__dirname, "..", "..", "package.json"), "utf-8"))
@@ -167,7 +187,8 @@ export default defineConfig({
     siteTitle: "Fullsend",
 
     multiVersionBuild: {
-      satisfies: ">=0.37.0",
+      match: MVB_TAG_MATCH,
+      satisfies: getLatestPatchMatching(gitVersionTags(MVB_TAG_MATCH), ">=0.37.0"),
       build: "stable",
     },
 
