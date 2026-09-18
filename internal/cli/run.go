@@ -2299,8 +2299,11 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 		agentCtx, agentSpan := tracer.Start(ctx, "agent", trace.WithAttributes(agentSpanStartAttrs(iteration, agentName)...))
 		// One collector per iteration: iteration and agent span are 1:1, so
 		// a run-scoped collector would repeat earlier iterations' content on
-		// later spans. Nil when the Level 3 gate is off; nil is inert.
+		// later spans. Nil when the Level 3 gate is off; nil is inert. The
+		// tool-span tracker is per iteration for the same reason and is not
+		// gated: execute_tool spans are metadata.
 		collector := newContentCollectorIfEnabled()
+		toolSpans := newToolSpanTracker(tracer, agentCtx)
 		var metrics agentruntime.RunMetrics
 		hooksSettings := ""
 		if h.SecurityEnabled() {
@@ -2323,10 +2326,15 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			Prompt:            agentPrompt,
 			Forge:             forgePlatform,
 			ModelAliases:      configModelAliases,
-			OnEvent:           contentEventHandler(agentruntime.NewEventRenderer(printer).Handle, collector),
+			OnEvent:           iterationEventHandler(agentruntime.NewEventRenderer(printer).Handle, collector, toolSpans),
 		}, printer, agentStart, &metrics)
 		close(heartbeatDone)
 		lastIterElapsed = time.Since(agentStart)
+
+		// The stream is over: end unanswered calls now, ahead of content
+		// assembly, whose redaction pass would otherwise sit inside their
+		// spans. finalizeAgentSpan's Finish still reports the overflow.
+		toolSpans.Finish()
 
 		// Attach content immediately before each finalize path ends the
 		// span, carrying the schema-required finish_reason from the
@@ -2347,7 +2355,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 		if cancelled, cancelExitCode, cancelledErr := handleRunCancellation(
 			ctx, runErr, iteration, exitCode, genAISystem, rt.Name(),
-			&metrics, aggMetrics, runDir, agentSpan, attachIterationContent,
+			&metrics, aggMetrics, runDir, agentSpan, toolSpans, attachIterationContent,
 			printer, lastIterElapsed,
 		); cancelled {
 			lastExitCode = cancelExitCode
@@ -2356,7 +2364,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 
 		if runErr != nil {
 			attachIterationContent("error")
-			finalizeAgentSpan(agentSpan, runErr, iteration, exitCode, genAISystem, rt.Name(), &metrics, "")
+			finalizeAgentSpan(agentSpan, runErr, iteration, exitCode, genAISystem, rt.Name(), &metrics, "", toolSpans)
 			printer.StepFail("Agent execution failed")
 			// Record the real exit code (rt.Run returns -1 when the agent never
 			// started) so the telemetry summary reports the failure faithfully
@@ -2403,7 +2411,7 @@ func runAgent(ctx context.Context, agentName, fullsendDir, outputBase, targetRep
 			contentFinishReason = "error"
 		}
 		attachIterationContent(contentFinishReason)
-		finalizeAgentSpan(agentSpan, nil, iteration, exitCode, genAISystem, rt.Name(), &metrics, transcriptErrMsg)
+		finalizeAgentSpan(agentSpan, nil, iteration, exitCode, genAISystem, rt.Name(), &metrics, transcriptErrMsg, toolSpans)
 
 		printer.Blank()
 		// Non-zero exit is a warning, not a failure — the validation loop is the success gate.
@@ -3756,6 +3764,15 @@ func finalizeRootSpan(span trace.Span, runErr error, exitCode int, validationPas
 	span.End()
 }
 
+// recordToolSpanOverflow marks an agent span whose iteration had id-bearing
+// tool calls refused a span at the cap (maxToolSpansPerIteration), so a
+// consumer can tell a capped execute_tool set from an uncapped one.
+func recordToolSpanOverflow(span trace.Span, dropped int) {
+	if dropped > 0 {
+		span.SetAttributes(attribute.Int("fullsend.tool_spans.dropped", dropped))
+	}
+}
+
 // finalizeSandboxSpan records the sandbox-create outcome and ends the
 // span. On failure the create error — which embeds raw supervisor/
 // gateway/container logs — gets the same treatment as the agent and root
@@ -3809,6 +3826,7 @@ func handleRunCancellation(
 	aggMetrics aggregateMetrics,
 	runDir string,
 	agentSpan trace.Span,
+	toolSpans *toolSpanTracker,
 	attachIterationContent func(finishReason string),
 	printer *ui.Printer,
 	lastIterElapsed time.Duration,
@@ -3821,7 +3839,7 @@ func handleRunCancellation(
 		runErr = cancelErr
 	}
 	attachIterationContent("error")
-	finalizeAgentSpan(agentSpan, runErr, iteration, exitCode, system, runtimeName, metrics, "")
+	finalizeAgentSpan(agentSpan, runErr, iteration, exitCode, system, runtimeName, metrics, "", toolSpans)
 	printer.StepWarn(fmt.Sprintf("Run cancelled (iteration %d, %.1fs elapsed)", iteration, lastIterElapsed.Seconds()))
 	if writeErr := writeMetricsJSON(runDir, aggMetrics); writeErr != nil {
 		printer.StepWarn("Failed to write metrics.json: " + writeErr.Error())
@@ -3833,7 +3851,12 @@ func handleRunCancellation(
 // agent span and ends it. transcriptErr is non-empty when the transcript
 // reported a failure the process exit code did not (#2786): exit_code keeps
 // the raw process exit and fullsend.transcript_error marks the override.
-func finalizeAgentSpan(span trace.Span, runErr error, iteration, exitCode int, system, runtimeName string, m *agentruntime.RunMetrics, transcriptErr string) {
+func finalizeAgentSpan(span trace.Span, runErr error, iteration, exitCode int, system, runtimeName string, m *agentruntime.RunMetrics, transcriptErr string, toolSpans *toolSpanTracker) {
+	// Every path that ends the agent span ends its open tool spans first and
+	// records the overflow, so a cancelled iteration (SIGINT, or the Actions
+	// SIGTERM handleRunCancellation names) still lands its unanswered calls
+	// in the file sink before the process goes.
+	recordToolSpanOverflow(span, toolSpans.Finish())
 	span.SetAttributes(agentSpanEndAttrs(iteration, exitCode, system, runtimeName, m)...)
 	switch {
 	case runErr != nil:
@@ -4725,8 +4748,9 @@ func scanOutputFiles(outputDir, traceID string, printer *ui.Printer) error {
 		}
 		// Skip the telemetry JSONL: it is still open for append, and any
 		// Level 3 conversation content in it was already redacted at
-		// assembly (contentCollector) before reaching a span, so it needs
-		// no post-hoc sweep.
+		// assembly (contentCollector) before reaching a span, as were the
+		// tool names and call ids on execute_tool spans (toolSpanTracker), so
+		// it needs no post-hoc sweep.
 		if path == filepath.Join(outputDir, telemetry.TelemetryFile) {
 			return nil
 		}
