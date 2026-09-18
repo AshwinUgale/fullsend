@@ -12,6 +12,8 @@ coverage:
         threshold: 1%
     patch:
       default:
+        # Target 80%. threshold 5% => codecov/patch PASSES at >= 75%.
+        # PR comments still mark X below the 80% target even when green.
         target: 80%
         threshold: 5%
 

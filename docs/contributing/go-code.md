@@ -60,15 +60,15 @@ The `make wasm-build` target enforces these limits automatically — run it afte
 When making changes to Go code under `cmd/`, `internal/`, or `pkg/`:
 
 1. **Unit tests:** Run `make go-test` (or `go test ./...`) and fix any failures before committing.
-2. **Coverage:** CI enforces thresholds via [Codecov](https://about.codecov.io/) (see [`.codecov.yml`](../../.codecov.yml)). **Patch coverage** on changed lines must meet **80%** (with a 5% tolerance). **Project coverage** must not drop more than **1%** below the base branch. `make go-test` alone does **not** enforce these thresholds — you must verify coverage locally before committing. See [Verifying patch coverage locally](#verifying-patch-coverage-locally) below for the exact commands.
+2. **Coverage:** CI enforces thresholds via [Codecov](https://about.codecov.io/) (see [`.codecov.yml`](../../.codecov.yml)). **Patch coverage** on changed lines has an **80% target** and a **75% enforced floor** (5% threshold). Codecov PR comments mark ✗ below 80% even when the `codecov/patch` status check is green. **Project coverage** must not drop more than **1%** below the base branch. `make go-test` alone does **not** enforce these thresholds — you must verify coverage locally before committing. See [Verifying patch coverage locally](#verifying-patch-coverage-locally) below for the exact commands.
 3. **Vet:** Run `make go-vet` to catch common issues.
 4. **E2E tests:** Run `make e2e-test` if your changes touch `internal/appsetup/`, `internal/forge/`, `internal/cli/`, or `internal/layers/`. These tests exercise the full admin install/uninstall flow against live GitHub pool orgs using mint/OIDC authentication.
 
 ## Verifying patch coverage locally
 
 `make go-test` runs tests with `-cover` but does not check whether your
-changed lines meet the **80% patch coverage** threshold from
-[`.codecov.yml`](../../.codecov.yml). You must approximate this check
+changed lines meet the **80% patch coverage** target (75% enforced floor)
+from [`.codecov.yml`](../../.codecov.yml). You must approximate this check
 yourself before committing. Skipping this step is the most common cause
 of `codecov/patch` failures on first push.
 
@@ -117,17 +117,20 @@ of `codecov/patch` failures on first push.
    you added or modified — these approximate Codecov's line-level patch
    metric.
 
-5. **Assess against the threshold.** If the functions you changed or
-   added show coverage well below 80%, add or extend `_test.go` files
-   to cover the missing lines. Then re-run from step 3.
+5. **Assess against the 80% target (75% floor).** If the functions you
+   changed or added show coverage well below 80%, add or extend
+   `_test.go` files to cover the missing lines. Then re-run from step 3.
 
 ### What counts as covered
 
 Codecov measures line-level coverage on the diff. Locally, `go tool
 cover -func` reports function-level coverage, which is a coarser
-approximation. Target **≥ 80%** on the functions you touched. If a
-function has complex branching, use `go tool cover -html=coverage.out`
-to visually inspect which lines are covered.
+approximation. The `codecov/patch` status check passes at **≥ 75%**
+(80% target minus 5% threshold); PR comments still mark ✗ below 80%.
+Target **≥ 80%** on the functions you touched so both signals agree and
+to leave margin for the function-vs-line approximation. If a function
+has complex branching, use `go tool cover -html=coverage.out` to
+visually inspect which lines are covered.
 
 ### When to skip
 
