@@ -77,6 +77,15 @@ func ScoreRunHealthNamed(tr Trace, evalName, version string) EvaluationResult {
 
 	var toolErrors, unanswered, otherErrors, unmatched int
 	for _, s := range toolSpans {
+		// A synthesized unmatched-result span is a result with no reported
+		// call, not a call. Count it only as unmatched and skip the per-call
+		// error tally: an orphan error result carries error.type=tool_error,
+		// which would otherwise be double-counted as both unmatched and a
+		// tool error.
+		if flag, ok := s.AttrBool(attrToolUnmatched); ok && flag {
+			unmatched++
+			continue
+		}
 		if v, ok := s.AttrString(attrErrorType); ok {
 			switch v {
 			case errTypeToolError:
@@ -90,9 +99,6 @@ func ScoreRunHealthNamed(tr Trace, evalName, version string) EvaluationResult {
 				// registry gives an unknown scorer rather than dropping it.
 				otherErrors++
 			}
-		}
-		if flag, ok := s.AttrBool(attrToolUnmatched); ok && flag {
-			unmatched++
 		}
 	}
 

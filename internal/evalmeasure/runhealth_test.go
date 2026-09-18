@@ -104,6 +104,48 @@ func TestScoreRunHealth_UnknownErrorTypeCounted(t *testing.T) {
 	assert.Contains(t, r.Explanation, "tool_calls=2")
 }
 
+func TestScoreRunHealth_UnmatchedWithErrorType(t *testing.T) {
+	t.Parallel()
+	tr := runHealthTrace("61616161616161616161616161616161", baseRunAttrs(),
+		toolSpan(nil),
+		toolSpan(map[string]any{attrToolUnmatched: true, attrErrorType: errTypeToolError}))
+	r := ScoreRunHealth(tr)
+	assert.Equal(t, LabelFail, r.Label)
+	assert.Contains(t, r.Explanation, "unmatched=1")
+	// The unmatched span is not a real call.
+	assert.Contains(t, r.Explanation, "tool_calls=1")
+	// The error on the unmatched span should NOT inflate real-call error
+	// counters — the one real call was clean.
+	assert.Contains(t, r.Explanation, "tool_errors=0")
+}
+
+func TestScoreRunHealth_MultipleUnmatched(t *testing.T) {
+	t.Parallel()
+	tr := runHealthTrace("71717171717171717171717171717171", baseRunAttrs(),
+		toolSpan(nil),
+		toolSpan(map[string]any{attrToolUnmatched: true}),
+		toolSpan(map[string]any{attrToolUnmatched: true}))
+	r := ScoreRunHealth(tr)
+	assert.Equal(t, LabelFail, r.Label)
+	assert.Contains(t, r.Explanation, "unmatched=2")
+	assert.Contains(t, r.Explanation, "tool_calls=1")
+}
+
+func TestScoreRunHealth_MixedErrorTypes(t *testing.T) {
+	t.Parallel()
+	tr := runHealthTrace("81818181818181818181818181818181", baseRunAttrs(),
+		toolSpan(map[string]any{attrErrorType: errTypeToolError}),
+		toolSpan(map[string]any{attrErrorType: errTypeUnanswered}),
+		toolSpan(map[string]any{attrErrorType: "rate_limited"}),
+		toolSpan(nil))
+	r := ScoreRunHealth(tr)
+	assert.Equal(t, LabelPass, r.Label)
+	assert.Contains(t, r.Explanation, "tool_calls=4")
+	assert.Contains(t, r.Explanation, "tool_errors=1")
+	assert.Contains(t, r.Explanation, "unanswered=1")
+	assert.Contains(t, r.Explanation, "other_errors=1")
+}
+
 func TestScoreRunHealth_NoToolSpansSkips(t *testing.T) {
 	t.Parallel()
 	tr := runHealthTrace("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", baseRunAttrs())
