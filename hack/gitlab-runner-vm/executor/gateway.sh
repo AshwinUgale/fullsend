@@ -13,6 +13,9 @@
 # version-matched gateway with an empty registry, then throws the runner
 # away. These helpers give that parity: create in prepare, tear down in
 # cleanup, reap leftovers from an abruptly-killed prior job.
+# GitLab Runner is a system service, so `systemctl --user` has no login
+# session: user_systemctl pins XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+# to the linger instance before every user-systemd call (#7453).
 #
 # The expensive image layers (runner image, supervisor) stay in the VM's
 # Podman cache. Only the CLI (~39 MB) and a version-skewed supervisor
@@ -40,6 +43,30 @@ if [ -f "${_openshell_version_sh}" ]; then
   # shellcheck source=../../../.github/scripts/openshell-version.sh
   source "${_openshell_version_sh}"
 fi
+
+# GitLab Runner is a systemd *system* service running as RUNNER_USER
+# (setup_runner_user). It does not go through pam_systemd, so this process
+# never inherits XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS. Linger
+# (setup_podman) keeps user@UID.service and its bus alive, but
+# `systemctl --user` still needs those variables *here* to find the bus —
+# otherwise it fails with:
+#   Failed to connect to user scope bus via local transport:
+#   $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
+# Always pin them to the linger instance's canonical paths rather than
+# trusting inherited values (a parent may have an empty or stale session).
+ensure_user_systemd_env() {
+  local uid
+  uid="$(id -u)"
+  export XDG_RUNTIME_DIR="/run/user/${uid}"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+}
+
+# Every user-systemd call in this file (and in setup.sh, which sources us)
+# goes through this wrapper so a missing login session cannot skip the env.
+user_systemctl() {
+  ensure_user_systemd_env
+  command systemctl --user "$@"
+}
 
 # OpenShell's systemd user unit sets StateDirectory=openshell/gateway, which
 # for a user service is ~/.local/state/openshell/gateway (SQLite). TLS
@@ -96,10 +123,10 @@ openshell_supervisor_image() {
 }
 
 stop_openshell_gateway() {
-  systemctl --user stop openshell-gateway.service 2>/dev/null || true
+  user_systemctl stop openshell-gateway.service 2>/dev/null || true
   # Never leave the unit enabled: a reboot or lingering user session
   # would resurrect the long-lived daemon this per-job model replaces.
-  systemctl --user disable openshell-gateway.service 2>/dev/null || true
+  user_systemctl disable openshell-gateway.service 2>/dev/null || true
 }
 
 wipe_openshell_gateway_store() {
@@ -148,7 +175,7 @@ reap_orphaned_openshell() {
 wait_for_openshell_gateway() {
   local i=1
   while [ "${i}" -le 10 ]; do
-    if systemctl --user is-active --quiet openshell-gateway.service; then
+    if user_systemctl is-active --quiet openshell-gateway.service; then
       return 0
     fi
     i=$((i + 1))
@@ -183,9 +210,9 @@ start_fresh_openshell_gateway() {
   reap_openshell_sandboxes
   wipe_openshell_gateway_store
 
-  systemctl --user daemon-reload
+  user_systemctl daemon-reload
   # start, not enable: the unit must not come back on reboot/linger.
-  if ! systemctl --user start openshell-gateway.service; then
+  if ! user_systemctl start openshell-gateway.service; then
     echo "ERROR: systemctl failed to start openshell-gateway.service" >&2
     return 1
   fi
@@ -250,8 +277,8 @@ install_openshell_at_version() {
   # first so a running unit doesn't block disable, and fail if disable does
   # not succeed — otherwise a reboot before the next prepare/cleanup could
   # resurrect the long-lived daemon this per-job model replaces.
-  systemctl --user stop openshell-gateway.service 2>/dev/null || true
-  if ! systemctl --user disable openshell-gateway.service 2>/dev/null; then
+  user_systemctl stop openshell-gateway.service 2>/dev/null || true
+  if ! user_systemctl disable openshell-gateway.service 2>/dev/null; then
     echo "ERROR: could not disable openshell-gateway.service after installing OpenShell ${ver}" >&2
     return 1
   fi

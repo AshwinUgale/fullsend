@@ -615,6 +615,23 @@ else
   fail "create scripts missing executor/gateway.sh in copy/checksum lists"
 fi
 
+# Both clouds run the same setup.sh / gateway.sh; the user-session bus env
+# (#7453) must land on GCP and OpenShift runners without a per-cloud fork.
+SETUP="${SCRIPT_DIR}/setup.sh"
+GATEWAY="${SCRIPT_DIR}/executor/gateway.sh"
+if grep -Fq 'ensure_user_systemd_env' "${GATEWAY}" \
+  && grep -Fq 'user_systemctl' "${GATEWAY}" \
+  && grep -Fq 'user_systemctl' "${SETUP}" \
+  && grep -Fq 'Environment=XDG_RUNTIME_DIR=/run/user/%U' "${SETUP}" \
+  && grep -Fq 'executor/gateway.sh' "${CREATE_GCP}" \
+  && grep -Fq 'executor/gateway.sh' "${CREATE_OCP}" \
+  && grep -Fq 'setup.sh' "${CREATE_GCP}" \
+  && grep -Fq 'setup.sh' "${CREATE_OCP}"; then
+  pass "GCP and OpenShift provisioning paths both ship the user-systemd env fix"
+else
+  fail "user-systemd env fix is not on both GCP and OpenShift provisioning paths"
+fi
+
 # --no-service-account --no-scopes must be actual create-command flags
 # (indented, not only mentioned in comments) so new VMs get no default
 # Compute SA. See #7254.
