@@ -50,6 +50,7 @@ func TestScoreRunHealth_CleanPass(t *testing.T) {
 	assert.Equal(t, "acme/demo#1", r.WorkItemID)
 	assert.Contains(t, r.Explanation, "tool_calls=2")
 	assert.Contains(t, r.Explanation, "tool_errors=0")
+	assert.Contains(t, r.Explanation, "other_errors=0")
 	assert.Contains(t, r.Explanation, "unmatched=0")
 	assert.NotContains(t, r.Explanation, "integrity defect")
 }
@@ -87,6 +88,20 @@ func TestScoreRunHealth_UnmatchedFails(t *testing.T) {
 	assert.Equal(t, 0.0, r.Value)
 	assert.Contains(t, r.Explanation, "integrity defect: tool result with no matching call")
 	assert.Contains(t, r.Explanation, "unmatched=1")
+	// The synthesized unmatched span is not a real call, so tool_calls
+	// counts only the one real call, not both execute_tool spans.
+	assert.Contains(t, r.Explanation, "tool_calls=1")
+}
+
+func TestScoreRunHealth_UnknownErrorTypeCounted(t *testing.T) {
+	t.Parallel()
+	tr := runHealthTrace("51515151515151515151515151515151", baseRunAttrs(),
+		toolSpan(map[string]any{attrErrorType: "rate_limited"}),
+		toolSpan(nil))
+	r := ScoreRunHealth(tr)
+	assert.Equal(t, LabelPass, r.Label, "an unrecognized error.type is a signal, not a v1 failure")
+	assert.Contains(t, r.Explanation, "other_errors=1")
+	assert.Contains(t, r.Explanation, "tool_calls=2")
 }
 
 func TestScoreRunHealth_NoToolSpansSkips(t *testing.T) {

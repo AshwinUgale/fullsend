@@ -75,7 +75,7 @@ func ScoreRunHealthNamed(tr Trace, evalName, version string) EvaluationResult {
 			"no execute_tool spans; runtime emits none or run made no tool calls; excluded from run_health")
 	}
 
-	var toolErrors, unanswered, unmatched int
+	var toolErrors, unanswered, otherErrors, unmatched int
 	for _, s := range toolSpans {
 		if v, ok := s.AttrString(attrErrorType); ok {
 			switch v {
@@ -83,6 +83,12 @@ func ScoreRunHealthNamed(tr Trace, evalName, version string) EvaluationResult {
 				toolErrors++
 			case errTypeUnanswered:
 				unanswered++
+			default:
+				// A new error.type (a future timeout, rate_limited, …)
+				// stays visible as a count before an em-002@2 gives it
+				// semantic handling — the same forward-compatibility the
+				// registry gives an unknown scorer rather than dropping it.
+				otherErrors++
 			}
 		}
 		if flag, ok := s.AttrBool(attrToolUnmatched); ok && flag {
@@ -97,8 +103,12 @@ func ScoreRunHealthNamed(tr Trace, evalName, version string) EvaluationResult {
 		value = 0.0
 	}
 
-	expl := fmt.Sprintf("tool_calls=%d, tool_errors=%d, unanswered=%d, unmatched=%d",
-		len(toolSpans), toolErrors, unanswered, unmatched)
+	// tool_calls counts real calls only: a synthesized unmatched-result span
+	// (a result with no reported call) is not a call, so it is reported
+	// under unmatched, not folded into tool_calls.
+	toolCalls := len(toolSpans) - unmatched
+	expl := fmt.Sprintf("tool_calls=%d, tool_errors=%d, unanswered=%d, other_errors=%d, unmatched=%d",
+		toolCalls, toolErrors, unanswered, otherErrors, unmatched)
 	if unmatched > 0 {
 		expl = "integrity defect: tool result with no matching call; " + expl
 	}
