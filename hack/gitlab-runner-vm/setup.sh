@@ -58,9 +58,9 @@ if [ -f "${_openshell_version_sh}" ]; then
 fi
 OPENSHELL_VERSION="${OPENSHELL_VERSION:-0.0.116}"
 
-# Source the executor's gateway helpers (wait_for_openshell_gateway) so
-# configure_per_job_gateway can wait for the seed start instead of assuming
-# it worked.
+# Source the executor's gateway helpers (wait_for_openshell_gateway,
+# user_systemctl) so configure_per_job_gateway can wait for the seed start
+# and every systemctl --user call has a user-session bus.
 _gateway_sh="${SCRIPT_DIR}/executor/gateway.sh"
 if [ -f "${_gateway_sh}" ]; then
   # shellcheck source=executor/gateway.sh
@@ -309,7 +309,18 @@ setup_runner_user() {
   local override_dir="/etc/systemd/system/gitlab-runner.service.d"
   local override_file="${override_dir}/user.conf"
 
-  if [ -f "${override_file}" ] && grep -q "User=${RUNNER_USER}" "${override_file}"; then
+  # GitLab Runner is a system service, so it does not go through pam_systemd
+  # and does not inherit a user-session bus. Linger keeps user@UID.service
+  # alive; these Environment= lines let systemctl --user and rootless podman
+  # talk to it. %U is the UID of User= (systemd specifier).
+  #
+  # The skip path must also require the env lines: a VM provisioned before
+  # this fix has User= already, and re-running setup.sh has to rewrite the
+  # drop-in so existing runners converge without manual repair.
+  if [ -f "${override_file}" ] \
+    && grep -q "User=${RUNNER_USER}" "${override_file}" \
+    && grep -q 'XDG_RUNTIME_DIR=/run/user/%U' "${override_file}" \
+    && grep -q 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus' "${override_file}"; then
     ok "systemd override already in place"
     return
   fi
@@ -320,6 +331,8 @@ setup_runner_user() {
 User=${RUNNER_USER}
 Group=${RUNNER_USER}
 WorkingDirectory=${HOME}
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 ExecStart=
 ExecStart=/usr/local/bin/gitlab-runner run --config ${CONFIG_TOML} --working-directory ${HOME} --service gitlab-runner
 EOF
@@ -349,7 +362,7 @@ setup_podman() {
   sudo loginctl enable-linger "${RUNNER_USER}"
   ok "linger enabled for ${RUNNER_USER}"
 
-  systemctl --user enable --now podman.socket
+  user_systemctl enable --now podman.socket
   ok "podman socket enabled"
 }
 
@@ -359,7 +372,7 @@ setup_podman() {
 install_openshell() {
   info "Installing OpenShell ${OPENSHELL_VERSION}"
 
-  if command -v openshell &>/dev/null && systemctl --user cat openshell-gateway.service &>/dev/null; then
+  if command -v openshell &>/dev/null && user_systemctl cat openshell-gateway.service &>/dev/null; then
     local current
     current=$(openshell --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "")
     if [ "${current}" = "${OPENSHELL_VERSION}" ]; then
@@ -384,7 +397,7 @@ install_openshell() {
   if ! command -v openshell &>/dev/null; then
     fail "openshell binary not found after install"
   fi
-  if ! systemctl --user cat openshell-gateway.service &>/dev/null; then
+  if ! user_systemctl cat openshell-gateway.service &>/dev/null; then
     fail "openshell-gateway.service not found after RPM install"
   fi
 
@@ -623,7 +636,7 @@ EOF
   fi
 
   # Restart the Podman socket so it picks up the hooks_dir config.
-  systemctl --user restart podman.socket
+  user_systemctl restart podman.socket
 
   ok "OCI hook installed for CA trust injection"
 }
@@ -639,7 +652,7 @@ EOF
 configure_per_job_gateway() {
   info "Configuring per-job OpenShell gateway (no long-lived daemon)"
 
-  systemctl --user daemon-reload
+  user_systemctl daemon-reload
 
   # Already-seeded re-run: a previous setup.sh patched the runner to the
   # custom executor and left the unit disabled and stopped. Skip the
@@ -652,9 +665,9 @@ configure_per_job_gateway() {
   # pin it back to per-job.
   if [ -f "${CONFIG_TOML}" ] \
     && grep -q 'executor = "custom"' "${CONFIG_TOML}" \
-    && systemctl --user cat openshell-gateway.service >/dev/null 2>&1 \
-    && ! systemctl --user is-enabled --quiet openshell-gateway.service \
-    && ! systemctl --user is-active --quiet openshell-gateway.service; then
+    && user_systemctl cat openshell-gateway.service >/dev/null 2>&1 \
+    && ! user_systemctl is-enabled --quiet openshell-gateway.service \
+    && ! user_systemctl is-active --quiet openshell-gateway.service; then
     openshell gateway remove openshell >/dev/null 2>&1 || true
     ok "openshell-gateway.service already seeded and disabled; skipping seed start"
     return
@@ -662,12 +675,12 @@ configure_per_job_gateway() {
 
   # Seed PKI + gateway.toml.default via a one-shot start, then stop and
   # disable. The next job's prepare.sh starts it for real with a wiped store.
-  systemctl --user start openshell-gateway.service || true
+  user_systemctl start openshell-gateway.service || true
   if ! wait_for_openshell_gateway; then
     fail "openshell-gateway.service did not become active during the seed start — check: journalctl --user -u openshell-gateway"
   fi
-  systemctl --user stop openshell-gateway.service 2>/dev/null || true
-  systemctl --user disable openshell-gateway.service 2>/dev/null || true
+  user_systemctl stop openshell-gateway.service 2>/dev/null || true
+  user_systemctl disable openshell-gateway.service 2>/dev/null || true
 
   # Drop any CLI registration from the seed start; prepare.sh re-adds it.
   openshell gateway remove openshell >/dev/null 2>&1 || true
@@ -810,18 +823,18 @@ verify() {
     echo "  WARN: openshell version mismatch"; errors=$((errors + 1))
   fi
 
-  if systemctl --user is-enabled --quiet openshell-gateway.service 2>/dev/null; then
+  if user_systemctl is-enabled --quiet openshell-gateway.service 2>/dev/null; then
     echo "  WARN: openshell-gateway.service is enabled — jobs expect a per-job gateway"; errors=$((errors + 1))
   else
     ok "openshell-gateway.service not enabled (per-job)"
   fi
-  if systemctl --user is-active --quiet openshell-gateway.service; then
+  if user_systemctl is-active --quiet openshell-gateway.service; then
     echo "  WARN: gateway is running at setup end — prepare.sh should start it per job"; errors=$((errors + 1))
   else
     ok "gateway not running (started per job in prepare.sh)"
   fi
 
-  if systemctl --user is-active --quiet podman.socket; then
+  if user_systemctl is-active --quiet podman.socket; then
     ok "podman socket active"
   else
     echo "  WARN: podman socket not active"; errors=$((errors + 1))
