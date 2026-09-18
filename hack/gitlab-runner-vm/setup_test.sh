@@ -173,6 +173,31 @@ else
   fail "configure_per_job_gateway missing seed-start skip"
 fi
 
+if grep -Fq 'Environment=XDG_RUNTIME_DIR=/run/user/%U' "${SETUP}" \
+  && grep -Fq 'Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus' "${SETUP}"; then
+  pass "setup_runner_user writes user-session env into the gitlab-runner override"
+else
+  fail "setup_runner_user missing XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS Environment= lines"
+fi
+
+# A VM provisioned before #7453 has User= already. If the skip path only
+# checks User=, re-running setup.sh never rewrites the drop-in and jobs keep
+# failing. The skip must require the env lines so existing runners converge.
+if grep -B8 'systemd override already in place' "${SETUP}" \
+  | grep -Fq 'XDG_RUNTIME_DIR=/run/user/%U' \
+  && grep -B8 'systemd override already in place' "${SETUP}" \
+  | grep -Fq 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus'; then
+  pass "setup_runner_user skip path requires user-session env (re-run converges a pre-fix override)"
+else
+  fail "setup_runner_user skip path does not require user-session env — existing VMs would not converge"
+fi
+
+if grep -E '^[[:space:]]+systemctl --user' "${SETUP}" >/dev/null; then
+  fail "setup.sh still invokes systemctl --user directly; use user_systemctl so the user-session env is set"
+else
+  pass "setup.sh routes user-systemd calls through user_systemctl"
+fi
+
 if grep -Fq 'Single-runner VM assumption' "${SETUP}"; then
   pass "patch_config documents the single-runner assumption"
 else

@@ -7,7 +7,14 @@ fullsend agent jobs.
 ## Architecture
 
 Each runner VM runs:
-- **gitlab-runner** (custom executor) — receives CI jobs from GitLab
+- **gitlab-runner** (custom executor) — receives CI jobs from GitLab.
+  The runner is a systemd *system* service running as the VM user, so it
+  does not go through `pam_systemd` and does not inherit a login session.
+  `setup.sh` enables lingering for that user and writes `XDG_RUNTIME_DIR`
+  / `DBUS_SESSION_BUS_ADDRESS` into the gitlab-runner drop-in so
+  `systemctl --user` (OpenShell gateway start/stop) can reach the user
+  bus. `executor/gateway.sh` also pins those variables itself, so a job
+  still works if the unit environment is missing (#7453).
 - **Podman** (rootless) — creates per-job containers
 - **OpenShell gateway** — started per job in `prepare.sh`, torn down in
   `cleanup.sh`. The VM does **not** keep a long-lived `systemd --user`
